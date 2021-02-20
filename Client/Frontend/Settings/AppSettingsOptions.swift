@@ -7,11 +7,20 @@ import Shared
 import Account
 import SwiftKeychainWrapper
 import LocalAuthentication
+import Glean
 
 // This file contains all of the settings available in the main settings screen of the app.
 
 private var ShowDebugSettings: Bool = false
 private var DebugSettingsClickCount: Int = 0
+
+private var disclosureIndicator: UIImageView {
+    let disclosureIndicator = UIImageView()
+    disclosureIndicator.image = UIImage(named: "menu-Disclosure")?.withRenderingMode(.alwaysTemplate)
+    disclosureIndicator.tintColor = UIColor.theme.tableView.accessoryViewTint
+    disclosureIndicator.sizeToFit()
+    return disclosureIndicator
+}
 
 // For great debugging!
 class HiddenSetting: Setting {
@@ -29,7 +38,7 @@ class HiddenSetting: Setting {
 
 // Sync setting for connecting a Firefox Account.  Shown when we don't have an account.
 class ConnectSetting: WithoutAccountSetting {
-    override var accessoryType: UITableViewCell.AccessoryType { return .disclosureIndicator }
+    override var accessoryView: UIImageView? { return disclosureIndicator }
 
     override var title: NSAttributedString? {
         return NSAttributedString(string: Strings.FxASignInToSync, attributes: [NSAttributedString.Key.foregroundColor: UIColor.theme.tableView.rowText])
@@ -38,10 +47,8 @@ class ConnectSetting: WithoutAccountSetting {
     override var accessibilityIdentifier: String? { return "SignInToSync" }
 
     override func onClick(_ navigationController: UINavigationController?) {
-        let fxaParams = FxALaunchParams(query: ["entrypoint": "preferences"])
-        let viewController = FxAContentViewController(profile: profile, fxaOptions: fxaParams)
-        viewController.delegate = self
-        viewController.url = settings.profile.accountConfiguration.signInURL
+        let viewController = FirefoxAccountSignInViewController(profile: profile, parentType: .settings, deepLinkParams: nil)
+        TelemetryWrapper.recordEvent(category: .firefoxAccount, method: .view, object: .settings)
         navigationController?.pushViewController(viewController, animated: true)
     }
 
@@ -160,11 +167,15 @@ class SyncNowSetting: WithAccountSetting {
     override var hidden: Bool { return !enabled }
 
     override var enabled: Bool {
-        if !DeviceInfo.hasConnectivity() {
-            return false
-        }
+        get {
+            if !DeviceInfo.hasConnectivity() {
+                return false
+            }
 
-        return profile.hasSyncableAccount()
+            return profile.hasSyncableAccount()
+        }
+        set {
+        }
     }
 
     fileprivate lazy var troubleshootButton: UIButton = {
@@ -296,69 +307,25 @@ class AccountStatusSetting: WithAccountSetting {
         }
     }
 
-    override var image: UIImage? {
-        if let image = profile.getAccount()?.fxaProfile?.avatar.image {
-            return image.createScaled(CGSize(width: 30, height: 30))
-        }
-
-        let image = UIImage(named: "placeholder-avatar")
-        return image?.createScaled(CGSize(width: 30, height: 30))
-    }
-
-    override var accessoryType: UITableViewCell.AccessoryType {
-        if let account = profile.getAccount() {
-            switch account.actionNeeded {
-            case .needsVerification:
-                // We link to the resend verification email page.
-                return .disclosureIndicator
-            case .needsPassword:
-                 // We link to the re-enter password page.
-                return .disclosureIndicator
-            case .none:
-                // We link to FxA web /settings.
-                return .disclosureIndicator
-            case .needsUpgrade:
-                // In future, we'll want to link to an upgrade page.
-                return .none
-            }
-        }
-        return .disclosureIndicator
+    override var accessoryView: UIImageView? {
+        return disclosureIndicator
     }
 
     override var title: NSAttributedString? {
-        if let account = profile.getAccount() {
-
-            if let displayName = account.fxaProfile?.displayName {
-                return NSAttributedString(string: displayName, attributes: [NSAttributedString.Key.font: DynamicFontHelper.defaultHelper.DefaultStandardFontBold, NSAttributedString.Key.foregroundColor: UIColor.theme.tableView.syncText])
-            }
-
-            if let email = account.fxaProfile?.email {
-                return NSAttributedString(string: email, attributes: [NSAttributedString.Key.font: DynamicFontHelper.defaultHelper.DefaultStandardFontBold, NSAttributedString.Key.foregroundColor: UIColor.theme.tableView.syncText])
-            }
-
-            return NSAttributedString(string: account.email, attributes: [NSAttributedString.Key.font: DynamicFontHelper.defaultHelper.DefaultStandardFontBold, NSAttributedString.Key.foregroundColor: UIColor.theme.tableView.syncText])
+        if let displayName = RustFirefoxAccounts.shared.userProfile?.displayName {
+            return NSAttributedString(string: displayName, attributes: [NSAttributedString.Key.font: DynamicFontHelper.defaultHelper.DefaultStandardFontBold, NSAttributedString.Key.foregroundColor: UIColor.theme.tableView.syncText])
         }
+
+        if let email = RustFirefoxAccounts.shared.userProfile?.email {
+            return NSAttributedString(string: email, attributes: [NSAttributedString.Key.font: DynamicFontHelper.defaultHelper.DefaultStandardFontBold, NSAttributedString.Key.foregroundColor: UIColor.theme.tableView.syncText])
+        }
+
         return nil
     }
 
     override var status: NSAttributedString? {
-        if let account = profile.getAccount() {
-            var string: String
-
-            switch account.actionNeeded {
-            case .none:
-                return nil
-            case .needsVerification:
-                string = Strings.FxAAccountVerifyEmail
-                break
-            case .needsPassword:
-                string = Strings.FxAAccountVerifyPassword
-                break
-            case .needsUpgrade:
-                string = Strings.FxAAccountUpgradeFirefox
-                break
-            }
-
+        if RustFirefoxAccounts.shared.isActionNeeded {
+            let string = Strings.FxAAccountVerifyPassword
             let orange = UIColor.theme.tableView.warningText
             let range = NSRange(location: 0, length: string.count)
             let attrs = [NSAttributedString.Key.foregroundColor: orange]
@@ -370,34 +337,15 @@ class AccountStatusSetting: WithAccountSetting {
     }
 
     override func onClick(_ navigationController: UINavigationController?) {
-        let fxaParams = FxALaunchParams(query: ["entrypoint": "preferences"])
-        let viewController = FxAContentViewController(profile: profile, fxaOptions: fxaParams)
-        viewController.delegate = self
-
-        if let account = profile.getAccount() {
-            switch account.actionNeeded {
-            case .none:
-                let viewController = SyncContentSettingsViewController()
-                viewController.profile = profile
-                navigationController?.pushViewController(viewController, animated: true)
-                return
-            case .needsVerification:
-                var cs = URLComponents(url: account.configuration.settingsURL, resolvingAgainstBaseURL: false)
-                cs?.queryItems?.append(URLQueryItem(name: "email", value: account.email))
-                if let url = cs?.url {
-                    viewController.url = url
-                }
-            case .needsPassword:
-                var cs = URLComponents(url: account.configuration.forceAuthURL, resolvingAgainstBaseURL: false)
-                cs?.queryItems?.append(URLQueryItem(name: "email", value: account.email))
-                if let url = cs?.url {
-                    viewController.url = url
-                }
-            case .needsUpgrade:
-                // In future, we'll want to link to an upgrade page.
-                return
-            }
+        guard !profile.rustFxA.accountNeedsReauth() else {
+            let vc = FirefoxAccountSignInViewController(profile: profile, parentType: .settings, deepLinkParams: nil)
+            TelemetryWrapper.recordEvent(category: .firefoxAccount, method: .view, object: .settings)
+            navigationController?.pushViewController(vc, animated: true)
+            return
         }
+
+        let viewController = SyncContentSettingsViewController()
+        viewController.profile = profile
         navigationController?.pushViewController(viewController, animated: true)
     }
 
@@ -408,74 +356,13 @@ class AccountStatusSetting: WithAccountSetting {
             imageView.frame = CGRect(width: 30, height: 30)
             imageView.layer.cornerRadius = (imageView.frame.height) / 2
             imageView.layer.masksToBounds = true
-            imageView.image = image
+
+            imageView.image = UIImage(named: "placeholder-avatar")!.createScaled(CGSize(width: 30, height: 30))
+
+            RustFirefoxAccounts.shared.avatar?.image.uponQueue(.main) { image in
+                imageView.image = image.createScaled(CGSize(width: 30, height: 30))
+            }
         }
-    }
-}
-
-// For great debugging!
-class RequirePasswordDebugSetting: WithAccountSetting {
-    override var hidden: Bool {
-        if !ShowDebugSettings {
-            return true
-        }
-        if let account = profile.getAccount(), account.actionNeeded != FxAActionNeeded.needsPassword {
-            return false
-        }
-        return true
-    }
-
-    override var title: NSAttributedString? {
-        return NSAttributedString(string: NSLocalizedString("Debug: require password", comment: "Debug option"), attributes: [NSAttributedString.Key.foregroundColor: UIColor.theme.tableView.rowText])
-    }
-
-    override func onClick(_ navigationController: UINavigationController?) {
-        profile.getAccount()?.makeSeparated()
-        settings.tableView.reloadData()
-    }
-}
-
-// For great debugging!
-class RequireUpgradeDebugSetting: WithAccountSetting {
-    override var hidden: Bool {
-        if !ShowDebugSettings {
-            return true
-        }
-        if let account = profile.getAccount(), account.actionNeeded != FxAActionNeeded.needsUpgrade {
-            return false
-        }
-        return true
-    }
-
-    override var title: NSAttributedString? {
-        return NSAttributedString(string: NSLocalizedString("Debug: require upgrade", comment: "Debug option"), attributes: [NSAttributedString.Key.foregroundColor: UIColor.theme.tableView.rowText])
-    }
-
-    override func onClick(_ navigationController: UINavigationController?) {
-        profile.getAccount()?.makeDoghouse()
-        settings.tableView.reloadData()
-    }
-}
-
-// For great debugging!
-class ForgetSyncAuthStateDebugSetting: WithAccountSetting {
-    override var hidden: Bool {
-        if !ShowDebugSettings {
-            return true
-        }
-        if let _ = profile.getAccount() {
-            return false
-        }
-        return true
-    }
-
-    override var title: NSAttributedString? {
-        return NSAttributedString(string: NSLocalizedString("Debug: forget Sync auth state", comment: "Debug option"), attributes: [NSAttributedString.Key.foregroundColor: UIColor.theme.tableView.rowText])
-    }
-
-    override func onClick(_ navigationController: UINavigationController?) {
-        profile.getAccount()?.syncAuthState.invalidate()
-        settings.tableView.reloadData()
     }
 }
 
@@ -570,6 +457,20 @@ class ForceCrashSetting: HiddenSetting {
     }
 }
 
+class ChangeToChinaSetting: HiddenSetting {
+    override var title: NSAttributedString? {
+        return NSAttributedString(string: "Debug: toggle China version (needs restart)", attributes: [NSAttributedString.Key.foregroundColor: UIColor.theme.tableView.rowText])
+    }
+
+    override func onClick(_ navigationController: UINavigationController?) {
+        if UserDefaults.standard.bool(forKey: debugPrefIsChinaEdition) {
+            UserDefaults.standard.removeObject(forKey: debugPrefIsChinaEdition)
+        } else {
+            UserDefaults.standard.set(true, forKey: debugPrefIsChinaEdition)
+        }
+    }
+}
+
 class SlowTheDatabase: HiddenSetting {
     override var title: NSAttributedString? {
         return NSAttributedString(string: "Debug: simulate slow database operations", attributes: [NSAttributedString.Key.foregroundColor: UIColor.theme.tableView.rowText])
@@ -580,11 +481,125 @@ class SlowTheDatabase: HiddenSetting {
     }
 }
 
+class ForgetSyncAuthStateDebugSetting: HiddenSetting {
+    override var title: NSAttributedString? {
+        return NSAttributedString(string: "Debug: forget Sync auth state", attributes: [NSAttributedString.Key.foregroundColor: UIColor.theme.tableView.rowText])
+    }
+
+    override func onClick(_ navigationController: UINavigationController?) {
+        settings.profile.rustFxA.syncAuthState.invalidate()
+        settings.tableView.reloadData()
+    }
+}
+
+class SentryIDSetting: HiddenSetting {
+    let deviceAppHash = UserDefaults(suiteName: AppInfo.sharedContainerIdentifier)?.string(forKey: "SentryDeviceAppHash") ?? "0000000000000000000000000000000000000000"
+    override var title: NSAttributedString? {
+        return NSAttributedString(string: "Sentry ID: \(deviceAppHash)", attributes: [NSAttributedString.Key.foregroundColor: UIColor.theme.tableView.rowText, NSAttributedString.Key.font: UIFont.systemFont(ofSize: 10)])
+    }
+
+    override func onClick(_ navigationController: UINavigationController?) {
+        copyAppDeviceIDAndPresentAlert(by: navigationController)
+    }
+
+    func copyAppDeviceIDAndPresentAlert(by navigationController: UINavigationController?) {
+        let alertTitle = Strings.SettingsCopyAppVersionAlertTitle
+        let alert = AlertController(title: alertTitle, message: nil, preferredStyle: .alert)
+        getSelectedCell(by: navigationController)?.setSelected(false, animated: true)
+        UIPasteboard.general.string = deviceAppHash
+        navigationController?.topViewController?.present(alert, animated: true) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                alert.dismiss(animated: true)
+            }
+        }
+    }
+
+    func getSelectedCell(by navigationController: UINavigationController?) -> UITableViewCell? {
+        let controller = navigationController?.topViewController
+        let tableView = (controller as? AppSettingsTableViewController)?.tableView
+        guard let indexPath = tableView?.indexPathForSelectedRow else { return nil }
+        return tableView?.cellForRow(at: indexPath)
+    }
+}
+
+class ShowEtpCoverSheet: HiddenSetting {
+    let profile: Profile
+    
+    override var title: NSAttributedString? {
+        return NSAttributedString(string: "Debug: ETP Cover Sheet On", attributes: [NSAttributedString.Key.foregroundColor: UIColor.theme.tableView.rowText])
+    }
+    
+    override init(settings: SettingsTableViewController) {
+        self.profile = settings.profile
+        super.init(settings: settings)
+    }
+    
+    override func onClick(_ navigationController: UINavigationController?) {
+        BrowserViewController.foregroundBVC().hasTriedToPresentETPAlready = false
+        // ETP is shown when user opens app for 3rd time on clean install.
+        // Hence setting session to 2 (0,1,2) for 3rd install as it starts from 0 being 1st session
+        self.profile.prefs.setInt(2, forKey: PrefsKeys.KeyInstallSession)
+        self.profile.prefs.setString(ETPCoverSheetShowType.CleanInstall.rawValue, forKey: PrefsKeys.KeyETPCoverSheetShowType)
+    }
+}
+
+class ToggleOnboarding: HiddenSetting {
+    override var title: NSAttributedString? {
+        return NSAttributedString(string: "Debug: Toggle onboarding type", attributes: [NSAttributedString.Key.foregroundColor: UIColor.theme.tableView.rowText])
+    }
+
+    override func onClick(_ navigationController: UINavigationController?) {
+        let onboardingResearch = OnboardingUserResearch()
+        let type = onboardingResearch.onboardingScreenType
+        var newOnboardingType: OnboardingScreenType = .versionV2
+        if type == nil {
+            newOnboardingType = .versionV1
+        } else if type == .versionV2 {
+            newOnboardingType = .versionV1
+        }
+        OnboardingUserResearch().onboardingScreenType = newOnboardingType
+    }
+}
+
+class LeanplumStatus: HiddenSetting {
+    let lplumSetupType = LeanPlumClient.shared.lpSetupType()
+    override var title: NSAttributedString? {
+        return NSAttributedString(string: "LP Setup: \(lplumSetupType) | Started: \(LeanPlumClient.shared.isRunning()) | Device ID: \(LeanPlumClient.shared.leanplumDeviceId ?? "")", attributes: [NSAttributedString.Key.foregroundColor: UIColor.theme.tableView.rowText])
+    }
+    
+    override func onClick(_ navigationController: UINavigationController?) {
+        copyLeanplumDeviceIDAndPresentAlert(by: navigationController)
+    }
+    
+    func copyLeanplumDeviceIDAndPresentAlert(by navigationController: UINavigationController?) {
+        let alertTitle = Strings.SettingsCopyAppVersionAlertTitle
+        let alert = AlertController(title: alertTitle, message: nil, preferredStyle: .alert)
+        UIPasteboard.general.string = "\(LeanPlumClient.shared.leanplumDeviceId ?? "")"
+        navigationController?.topViewController?.present(alert, animated: true) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                alert.dismiss(animated: true)
+            }
+        }
+    }
+}
+
+class ClearOnboardingABVariables: HiddenSetting {
+    override var title: NSAttributedString? {
+        // If we are running an A/B test this will also fetch the A/B test variables from leanplum. Re-open app to see the effect.
+        return NSAttributedString(string: "Debug: Clear onboarding AB variables", attributes: [NSAttributedString.Key.foregroundColor: UIColor.theme.tableView.rowText])
+    }
+
+    override func onClick(_ navigationController: UINavigationController?) {
+        settings.profile.prefs.removeObjectForKey(PrefsKeys.IntroSeen)
+        OnboardingUserResearch().onboardingScreenType = nil
+    }
+}
+
 // Show the current version of Firefox
 class VersionSetting: Setting {
     unowned let settings: SettingsTableViewController
 
-     override var accessibilityIdentifier: String? { return "FxVersion" }
+    override var accessibilityIdentifier: String? { return "FxVersion" }
 
     init(settings: SettingsTableViewController) {
         self.settings = settings
@@ -592,9 +607,15 @@ class VersionSetting: Setting {
     }
 
     override var title: NSAttributedString? {
-        let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as! String
-        let buildNumber = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as! String
-        return NSAttributedString(string: String(format: NSLocalizedString("Version %@ (%@)", comment: "Version number of Firefox shown in settings"), appVersion, buildNumber), attributes: [NSAttributedString.Key.foregroundColor: UIColor.theme.tableView.rowText])
+        return NSAttributedString(string: String(format: NSLocalizedString("Version %@ (%@)", comment: "Version number of Firefox shown in settings"),  VersionSetting.appVersion, VersionSetting.appBuildNumber), attributes: [NSAttributedString.Key.foregroundColor: UIColor.theme.tableView.rowText])
+    }
+    
+    public static var appVersion: String {
+        return Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as! String
+    }
+    
+    public static var appBuildNumber: String {
+        return Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as! String
     }
 
     override func onConfigureCell(_ cell: UITableViewCell) {
@@ -602,7 +623,6 @@ class VersionSetting: Setting {
     }
 
     override func onClick(_ navigationController: UINavigationController?) {
-        copyAppVersionAndPresentAlert(by: navigationController)
         DebugSettingsClickCount += 1
         if DebugSettingsClickCount >= 5 {
             DebugSettingsClickCount = 0
@@ -610,7 +630,11 @@ class VersionSetting: Setting {
             settings.tableView.reloadData()
         }
     }
-    
+
+    override func onLongPress(_ navigationController: UINavigationController?) {
+        copyAppVersionAndPresentAlert(by: navigationController)
+    }
+
     func copyAppVersionAndPresentAlert(by navigationController: UINavigationController?) {
         let alertTitle = Strings.SettingsCopyAppVersionAlertTitle
         let alert = AlertController(title: alertTitle, message: nil, preferredStyle: .alert)
@@ -675,9 +699,7 @@ class ShowIntroductionSetting: Setting {
 
     override func onClick(_ navigationController: UINavigationController?) {
         navigationController?.dismiss(animated: true, completion: {
-            if let appDelegate = UIApplication.shared.delegate as? AppDelegate {
-                appDelegate.browserViewController.presentIntroViewController(true)
-            }
+            BrowserViewController.foregroundBVC().presentIntroViewController(true)
         })
     }
 }
@@ -712,6 +734,7 @@ class SendAnonymousUsageDataSetting: BoolSetting {
                 AdjustIntegration.setEnabled($0)
                 LeanPlumClient.shared.set(attributes: [LPAttributeKey.telemetryOptIn: $0])
                 LeanPlumClient.shared.set(enabled: $0)
+                Glean.shared.setUploadEnabled($0)
             }
         )
     }
@@ -745,7 +768,7 @@ class OpenSupportPageSetting: Setting {
 class SearchSetting: Setting {
     let profile: Profile
 
-    override var accessoryType: UITableViewCell.AccessoryType { return .disclosureIndicator }
+    override var accessoryView: UIImageView? { return disclosureIndicator }
 
     override var style: UITableViewCell.CellStyle { return .value1 }
 
@@ -772,7 +795,7 @@ class LoginsSetting: Setting {
     weak var navigationController: UINavigationController?
     weak var settings: AppSettingsTableViewController?
 
-    override var accessoryType: UITableViewCell.AccessoryType { return .disclosureIndicator }
+    override var accessoryView: UIImageView? { return disclosureIndicator }
 
     override var accessibilityIdentifier: String? { return "Logins" }
 
@@ -795,8 +818,8 @@ class LoginsSetting: Setting {
     override func onClick(_: UINavigationController?) {
         deselectRow()
         
-        guard let appDelegate = UIApplication.shared.delegate as? AppDelegate, let navController = navigationController else { return }
-        LoginListViewController.create(authenticateInNavigationController: navController, profile: profile, settingsDelegate: appDelegate.browserViewController).uponQueue(.main) { loginsVC in
+        guard let navController = navigationController else { return }
+        LoginListViewController.create(authenticateInNavigationController: navController, profile: profile, settingsDelegate: BrowserViewController.foregroundBVC()).uponQueue(.main) { loginsVC in
             guard let loginsVC = loginsVC else { return }
             LeanPlumClient.shared.track(event: .openedLogins)
             navController.pushViewController(loginsVC, animated: true)
@@ -808,7 +831,7 @@ class TouchIDPasscodeSetting: Setting {
     let profile: Profile
     var tabManager: TabManager!
 
-    override var accessoryType: UITableViewCell.AccessoryType { return .disclosureIndicator }
+    override var accessoryView: UIImageView? { return disclosureIndicator }
 
     override var accessibilityIdentifier: String? { return "TouchIDPasscode" }
 
@@ -841,7 +864,7 @@ class TouchIDPasscodeSetting: Setting {
 class ContentBlockerSetting: Setting {
     let profile: Profile
     var tabManager: TabManager!
-    override var accessoryType: UITableViewCell.AccessoryType { return .disclosureIndicator }
+    override var accessoryView: UIImageView? { return disclosureIndicator }
     override var accessibilityIdentifier: String? { return "TrackingProtection" }
 
     init(settings: SettingsTableViewController) {
@@ -862,7 +885,7 @@ class ClearPrivateDataSetting: Setting {
     let profile: Profile
     var tabManager: TabManager!
 
-    override var accessoryType: UITableViewCell.AccessoryType { return .disclosureIndicator }
+    override var accessoryView: UIImageView? { return disclosureIndicator }
 
     override var accessibilityIdentifier: String? { return "ClearPrivateData" }
 
@@ -896,10 +919,14 @@ class PrivacyPolicySetting: Setting {
     }
 }
 
-class ChinaSyncServiceSetting: WithoutAccountSetting {
+class ChinaSyncServiceSetting: Setting {
     override var accessoryType: UITableViewCell.AccessoryType { return .none }
-    var prefs: Prefs { return settings.profile.prefs }
-    let prefKey = "useChinaSyncService"
+    var prefs: Prefs { return profile.prefs }
+    let prefKey = PrefsKeys.KeyEnableChinaSyncService
+    let profile: Profile
+    let settings: UIViewController
+
+    override var hidden: Bool { return !AppInfo.isChinaEdition }
 
     override var title: NSAttributedString? {
         return NSAttributedString(string: "本地同步服务", attributes: [NSAttributedString.Key.foregroundColor: UIColor.theme.tableView.rowText])
@@ -909,57 +936,9 @@ class ChinaSyncServiceSetting: WithoutAccountSetting {
         return NSAttributedString(string: "禁用后使用全球服务同步数据", attributes: [NSAttributedString.Key.foregroundColor: UIColor.theme.tableView.headerTextLight])
     }
 
-    override func onConfigureCell(_ cell: UITableViewCell) {
-        super.onConfigureCell(cell)
-        let control = UISwitchThemed()
-        control.onTintColor = UIColor.theme.tableView.controlTint
-        control.addTarget(self, action: #selector(switchValueChanged), for: .valueChanged)
-        control.isOn = prefs.boolForKey(prefKey) ?? BrowserProfile.isChinaEdition
-        cell.accessoryView = control
-        cell.selectionStyle = .none
-    }
-
-    @objc func switchValueChanged(_ toggle: UISwitch) {
-        prefs.setObject(toggle.isOn, forKey: prefKey)
-    }
-}
-
-class StageSyncServiceDebugSetting: WithoutAccountSetting {
-    override var accessoryType: UITableViewCell.AccessoryType { return .none }
-    var prefs: Prefs { return settings.profile.prefs }
-
-    var prefKey: String = "useStageSyncService"
-
-    override var accessibilityIdentifier: String? { return "DebugStageSync" }
-
-    override var hidden: Bool {
-        if !ShowDebugSettings {
-            return true
-        }
-        if let _ = profile.getAccount() {
-            return true
-        }
-        return false
-    }
-
-    override var title: NSAttributedString? {
-        return NSAttributedString(string: NSLocalizedString("Debug: use stage servers", comment: "Debug option"), attributes: [NSAttributedString.Key.foregroundColor: UIColor.theme.tableView.rowText])
-    }
-
-    override var status: NSAttributedString? {
-        // Derive the configuration we display from the profile. Currently, this could be either a custom
-        // FxA server or FxA stage servers.
-        let isOn = prefs.boolForKey(prefKey) ?? false
-        let isCustomSync = prefs.boolForKey(PrefsKeys.KeyUseCustomSyncService) ?? false
-
-        var configurationURL = ProductionFirefoxAccountConfiguration().authEndpointURL
-        if isCustomSync {
-            configurationURL = CustomFirefoxAccountConfiguration(prefs: profile.prefs).authEndpointURL
-        } else if isOn {
-            configurationURL = StageFirefoxAccountConfiguration().authEndpointURL
-        }
-
-        return NSAttributedString(string: configurationURL.absoluteString, attributes: [NSAttributedString.Key.foregroundColor: UIColor.theme.tableView.headerTextLight])
+    init(settings: SettingsTableViewController) {
+        self.profile = settings.profile
+        self.settings = settings
     }
 
     override func onConfigureCell(_ cell: UITableViewCell) {
@@ -967,21 +946,41 @@ class StageSyncServiceDebugSetting: WithoutAccountSetting {
         let control = UISwitchThemed()
         control.onTintColor = UIColor.theme.tableView.controlTint
         control.addTarget(self, action: #selector(switchValueChanged), for: .valueChanged)
-        control.isOn = prefs.boolForKey(prefKey) ?? false
+        control.isOn = prefs.boolForKey(prefKey) ?? AppInfo.isChinaEdition
         cell.accessoryView = control
         cell.selectionStyle = .none
     }
 
     @objc func switchValueChanged(_ toggle: UISwitch) {
-        prefs.setObject(toggle.isOn, forKey: prefKey)
-        settings.tableView.reloadData()
+        TelemetryWrapper.recordEvent(category: .action, method: .tap, object: .chinaServerSwitch)
+        guard profile.rustFxA.hasAccount() else {
+            prefs.setObject(toggle.isOn, forKey: prefKey)
+            RustFirefoxAccounts.reconfig(prefs: profile.prefs)
+            return
+        }
+
+        // Show confirmation dialog for the user to sign out of FxA
+
+        let msg = "更改此设置后，再次登录您的帐户" // "Sign-in again to your account after changing this setting"
+        let alert = UIAlertController(title: "", message: msg, preferredStyle: .alert)
+        let ok = UIAlertAction(title: Strings.OKString, style: .default) { _ in
+            self.prefs.setObject(toggle.isOn, forKey: self.prefKey)
+            self.profile.removeAccount()
+            RustFirefoxAccounts.reconfig(prefs: self.profile.prefs)
+        }
+        let cancel = UIAlertAction(title: Strings.CancelString, style: .default) { _ in
+            toggle.setOn(!toggle.isOn, animated: true)
+        }
+        alert.addAction(ok)
+        alert.addAction(cancel)
+        settings.present(alert, animated: true)
     }
 }
 
 class NewTabPageSetting: Setting {
     let profile: Profile
 
-    override var accessoryType: UITableViewCell.AccessoryType { return .disclosureIndicator }
+    override var accessoryView: UIImageView? { return disclosureIndicator }
 
     override var accessibilityIdentifier: String? { return "NewTab" }
 
@@ -1003,11 +1002,21 @@ class NewTabPageSetting: Setting {
     }
 }
 
+fileprivate func getDisclosureIndicator() -> UIImageView {
+    let disclosureIndicator = UIImageView()
+    disclosureIndicator.image = UIImage(named: "menu-Disclosure")?.withRenderingMode(.alwaysTemplate)
+    disclosureIndicator.tintColor = UIColor.theme.tableView.accessoryViewTint
+    disclosureIndicator.sizeToFit()
+    return disclosureIndicator
+}
+
 class HomeSetting: Setting {
     let profile: Profile
 
-    override var accessoryType: UITableViewCell.AccessoryType { return .disclosureIndicator }
-
+    override var accessoryView: UIImageView {
+        getDisclosureIndicator()
+    }
+    
     override var accessibilityIdentifier: String? { return "Home" }
 
     override var status: NSAttributedString {
@@ -1033,7 +1042,7 @@ class HomeSetting: Setting {
 class SiriPageSetting: Setting {
     let profile: Profile
 
-    override var accessoryType: UITableViewCell.AccessoryType { return .disclosureIndicator }
+    override var accessoryView: UIImageView? { return disclosureIndicator }
 
     override var accessibilityIdentifier: String? { return "SiriSettings" }
 
@@ -1053,7 +1062,7 @@ class SiriPageSetting: Setting {
 class OpenWithSetting: Setting {
     let profile: Profile
 
-    override var accessoryType: UITableViewCell.AccessoryType { return .disclosureIndicator }
+    override var accessoryView: UIImageView? { return disclosureIndicator }
 
     override var accessibilityIdentifier: String? { return "OpenWith.Setting" }
 
@@ -1084,15 +1093,15 @@ class OpenWithSetting: Setting {
     }
 }
 
-class AdvanceAccountSetting: HiddenSetting {
+class AdvancedAccountSetting: HiddenSetting {
     let profile: Profile
 
-    override var accessoryType: UITableViewCell.AccessoryType { return .disclosureIndicator }
+    override var accessoryView: UIImageView? { return disclosureIndicator }
 
-    override var accessibilityIdentifier: String? { return "AdvanceAccount.Setting" }
+    override var accessibilityIdentifier: String? { return "AdvancedAccount.Setting" }
 
     override var title: NSAttributedString? {
-        return NSAttributedString(string: Strings.SettingsAdvanceAccountTitle, attributes: [NSAttributedString.Key.foregroundColor: UIColor.theme.tableView.rowText])
+        return NSAttributedString(string: Strings.SettingsAdvancedAccountTitle, attributes: [NSAttributedString.Key.foregroundColor: UIColor.theme.tableView.rowText])
     }
 
     override init(settings: SettingsTableViewController) {
@@ -1101,7 +1110,7 @@ class AdvanceAccountSetting: HiddenSetting {
     }
 
     override func onClick(_ navigationController: UINavigationController?) {
-        let viewController = AdvanceAccountSettingViewController()
+        let viewController = AdvancedAccountSettingViewController()
         viewController.profile = profile
         navigationController?.pushViewController(viewController, animated: true)
     }
@@ -1113,12 +1122,16 @@ class AdvanceAccountSetting: HiddenSetting {
 
 class ThemeSetting: Setting {
     let profile: Profile
-    override var accessoryType: UITableViewCell.AccessoryType { return .disclosureIndicator }
+    override var accessoryView: UIImageView? { return disclosureIndicator }
     override var style: UITableViewCell.CellStyle { return .value1 }
     override var accessibilityIdentifier: String? { return "DisplayThemeOption" }
 
     override var status: NSAttributedString {
-        if ThemeManager.instance.automaticBrightnessIsOn {
+        if ThemeManager.instance.systemThemeIsOn {
+            return NSAttributedString(string: Strings.SystemThemeSectionHeader)
+        } else if !ThemeManager.instance.automaticBrightnessIsOn {
+            return NSAttributedString(string: Strings.DisplayThemeManualStatusLabel)
+        } else if ThemeManager.instance.automaticBrightnessIsOn {
             return NSAttributedString(string: Strings.DisplayThemeAutomaticStatusLabel)
         }
         return NSAttributedString(string: "")
@@ -1136,7 +1149,7 @@ class ThemeSetting: Setting {
 
 class TranslationSetting: Setting {
     let profile: Profile
-    override var accessoryType: UITableViewCell.AccessoryType { return .disclosureIndicator }
+    override var accessoryView: UIImageView? { return disclosureIndicator }
     override var style: UITableViewCell.CellStyle { return .value1 }
     override var accessibilityIdentifier: String? { return "TranslationOption" }
 

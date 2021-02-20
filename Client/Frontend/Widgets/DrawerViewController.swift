@@ -12,7 +12,7 @@ struct DrawerViewControllerUX {
     static let HandleMargin: CGFloat = 20
     static let DrawerCornerRadius: CGFloat = 10
     static let DrawerTopStop: CGFloat = 60
-    static let DrawerPadWidth: CGFloat = 320
+    static let DrawerPadWidth: CGFloat = 380
 }
 
 public class DrawerView: UIView {
@@ -35,7 +35,7 @@ public class DrawerView: UIView {
     }
 }
 
-public class DrawerViewController: UIViewController {
+public class DrawerViewController: UIViewController, Themeable {
     public let childViewController: UIViewController
 
     public let drawerView = DrawerView()
@@ -107,7 +107,7 @@ public class DrawerViewController: UIViewController {
         let tapGestureRecognizer = UITapGestureRecognizer(target: self, action: #selector(didRecognizeTapGesture))
         backgroundOverlayView.addGestureRecognizer(tapGestureRecognizer)
 
-        drawerView.backgroundColor = UIColor.theme.tableView.headerBackground
+        drawerView.backgroundColor = ThemeManager.instance.currentName == .dark ? UIColor.theme.tableView.rowBackground : UIColor.theme.tableView.headerBackground
         view.addSubview(drawerView)
 
         let panGestureRecognizer = UIPanGestureRecognizer(target: self, action: #selector(didRecognizePanGesture))
@@ -145,6 +145,10 @@ public class DrawerViewController: UIViewController {
         super.viewDidAppear(animated)
 
         open()
+    }
+
+    public func applyTheme() {
+        drawerView.backgroundColor = ThemeManager.instance.currentName == .dark ? UIColor.theme.tableView.rowBackground : UIColor.theme.tableView.headerBackground
     }
 
     override public func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
@@ -251,8 +255,9 @@ public class DrawerViewController: UIViewController {
         }
     }
 
-    public func close() {
-        UIView.animate(withDuration: 0.25, animations: {
+    public func close(immediately: Bool = false) {
+        let duration = immediately ? 0.0 : 0.25
+        UIView.animate(withDuration: duration, animations: {
             if self.showingPadLayout {
                 self.xPosition = DrawerViewControllerUX.DrawerPadWidth
             } else {
@@ -267,14 +272,10 @@ public class DrawerViewController: UIViewController {
 }
 
 extension DrawerViewController: UIGestureRecognizerDelegate {
-    public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-        let description = otherGestureRecognizer.description
-        return !description.starts(with: "<UIScrollViewPanGestureRecognizer:")
-    }
-
-    public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-        let description = otherGestureRecognizer.description
-        return !description.starts(with: "<_UISwipeActionPanGestureRecognizer:") &&
-            !description.starts(with: "<UIScrollViewPanGestureRecognizer:")
+    public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        // Don't recognize touches for the pan gesture
+        // if they occurred on a `UITableView*` view.
+        let description = touch.view?.description ?? ""
+        return !description.starts(with: "<UITableView") && !description.starts(with: "<UITextField")
     }
 }

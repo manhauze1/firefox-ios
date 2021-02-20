@@ -14,6 +14,12 @@ import SyncTelemetry
 import Sync
 import CoreSpotlight
 import UserNotifications
+import Account
+
+#if canImport(BackgroundTasks)
+ import BackgroundTasks
+#endif
+
 
 private let log = Logger.browserLogger
 
@@ -38,10 +44,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UIViewControllerRestorati
     weak var application: UIApplication?
     var launchOptions: [AnyHashable: Any]?
 
-    let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as! String
-
     var receivedURLs = [URL]()
-    var unifiedTelemetry: UnifiedTelemetry?
+    var telemetry: TelemetryWrapper?
 
     func application(_ application: UIApplication, willFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         //
@@ -60,14 +64,13 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UIViewControllerRestorati
             self.applicationCleanlyBackgrounded = defaults.bool(forKey: "ApplicationCleanlyBackgrounded")
         }
         defaults.set(false, forKey: "ApplicationCleanlyBackgrounded")
-        defaults.synchronize()
 
         // Hold references to willFinishLaunching parameters for delayed app launch
         self.application = application
         self.launchOptions = launchOptions
 
         self.window = UIWindow(frame: UIScreen.main.bounds)
-        self.window!.backgroundColor = UIColor.Photon.White100
+        self.window?.backgroundColor = UIColor.theme.browser.background
 
         // If the 'Save logs to Files app on next launch' toggle
         // is turned on in the Settings app, copy over old logs.
@@ -104,7 +107,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UIViewControllerRestorati
 
         let profile = getProfile(application)
 
-        unifiedTelemetry = UnifiedTelemetry(profile: profile)
+        telemetry = TelemetryWrapper(profile: profile)
 
         // Set up a web server that serves us static content. Do this early so that it is ready when the UI is presented.
         setUpWebServer(profile)
@@ -121,6 +124,29 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UIViewControllerRestorati
         // Add restoration class, the factory that will return the ViewController we
         // will restore with.
 
+        setupRootViewController()
+
+        NotificationCenter.default.addObserver(forName: .FSReadingListAddReadingListItem, object: nil, queue: nil) { (notification) -> Void in
+            if let userInfo = notification.userInfo, let url = userInfo["URL"] as? URL {
+                let title = (userInfo["Title"] as? String) ?? ""
+                profile.readingList.createRecordWithURL(url.absoluteString, title: title, addedBy: UIDevice.current.name)
+            }
+        }
+
+        adjustIntegration = AdjustIntegration(profile: profile)
+
+        self.updateAuthenticationInfo()
+        SystemUtils.onFirstRun()
+
+        RustFirefoxAccounts.startup(prefs: profile.prefs).uponQueue(.main) { _ in
+            print("RustFirefoxAccounts started")
+        }
+        log.info("startApplication end")
+        return true
+    }
+
+    // TODO: Move to scene controller for iOS 13
+    private func setupRootViewController() {
         browserViewController = BrowserViewController(profile: self.profile!, tabManager: self.tabManager)
         browserViewController.edgesForExtendedLayout = []
 
@@ -134,35 +160,6 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UIViewControllerRestorati
         rootViewController = navigationController
 
         self.window!.rootViewController = rootViewController
-
-        NotificationCenter.default.addObserver(forName: .FSReadingListAddReadingListItem, object: nil, queue: nil) { (notification) -> Void in
-            if let userInfo = notification.userInfo, let url = userInfo["URL"] as? URL {
-                let title = (userInfo["Title"] as? String) ?? ""
-                profile.readingList.createRecordWithURL(url.absoluteString, title: title, addedBy: UIDevice.current.name)
-            }
-        }
-
-        NotificationCenter.default.addObserver(forName: .FirefoxAccountDeviceRegistrationUpdated, object: nil, queue: nil) { _ in
-            profile.flushAccount()
-        }
-
-        adjustIntegration = AdjustIntegration(profile: profile)
-
-        if LeanPlumClient.shouldEnable(profile: profile) {
-            LeanPlumClient.shared.setup(profile: profile)
-            LeanPlumClient.shared.set(enabled: true)
-        }
-
-        self.updateAuthenticationInfo()
-        SystemUtils.onFirstRun()
-
-        let fxaLoginHelper = FxALoginHelper.sharedInstance
-        fxaLoginHelper.application(application, didLoadProfile: profile)
-
-        profile.cleanupHistoryIfNeeded()
-
-        log.info("startApplication end")
-        return true
     }
 
     func applicationWillTerminate(_ application: UIApplication) {
@@ -201,8 +198,6 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UIViewControllerRestorati
 
         adjustIntegration?.triggerApplicationDidFinishLaunchingWithOptions(launchOptions)
 
-        UNUserNotificationCenter.current().delegate = self
-        SentTabAction.registerActions()
         UIScrollView.doBadSwizzleStuff()
 
         window!.makeKeyAndVisible()
@@ -226,6 +221,51 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UIViewControllerRestorati
         // that is an iOS bug or not.
         AutocompleteTextField.appearance().semanticContentAttribute = .forceLeftToRight
 
+        pushNotificationSetup()
+
+        // Leanplum usersearch variable setup for onboarding research
+        _ = OnboardingUserResearch()
+        // Leanplum setup
+
+        if let profile = self.profile, LeanPlumClient.shouldEnable(profile: profile) {
+            LeanPlumClient.shared.setup(profile: profile)
+            LeanPlumClient.shared.set(enabled: true)
+        }
+
+        if #available(iOS 13.0, *) {
+            BGTaskScheduler.shared.register(forTaskWithIdentifier: "org.mozilla.ios.sync.part1", using: DispatchQueue.global()) { task in
+                guard self.profile?.hasSyncableAccount() ?? false else {
+                    self.shutdownProfileWhenNotActive(application)
+                    return
+                }
+
+                NSLog("background sync part 1") // NSLog to see in device console
+                let collection = ["bookmarks", "history"]
+                self.profile?.syncManager.syncNamedCollections(why: .backgrounded, names: collection).uponQueue(.main) { _ in
+                    task.setTaskCompleted(success: true)
+                    let request = BGProcessingTaskRequest(identifier: "org.mozilla.ios.sync.part2")
+                    request.earliestBeginDate = Date(timeIntervalSinceNow: 1)
+                    request.requiresNetworkConnectivity = true
+                    do {
+                        try BGTaskScheduler.shared.submit(request)
+                    } catch {
+                        NSLog(error.localizedDescription)
+                    }
+                }
+            }
+
+            // Split up the sync tasks so each can get maximal time for a bg task.
+            // This task runs after the bookmarks+history sync.
+            BGTaskScheduler.shared.register(forTaskWithIdentifier: "org.mozilla.ios.sync.part2", using: DispatchQueue.global()) { task in
+                NSLog("background sync part 2") // NSLog to see in device console
+                let collection = ["tabs", "logins", "clients"]
+                self.profile?.syncManager.syncNamedCollections(why: .backgrounded, names: collection).uponQueue(.main) { _ in
+                    self.shutdownProfileWhenNotActive(application)
+                    task.setTaskCompleted(success: true)
+                }
+            }
+        }
+
         return shouldPerformAdditionalDelegateHandling
     }
 
@@ -236,15 +276,15 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UIViewControllerRestorati
 
         if let profile = profile, let _ = profile.prefs.boolForKey(PrefsKeys.AppExtensionTelemetryOpenUrl) {
             profile.prefs.removeObjectForKey(PrefsKeys.AppExtensionTelemetryOpenUrl)
-            var object = UnifiedTelemetry.EventObject.url
+            var object = TelemetryWrapper.EventObject.url
             if case .text(_) = routerpath {
                 object = .searchText
             }
-            UnifiedTelemetry.recordEvent(category: .appExtensionAction, method: .applicationOpenUrl, object: object)
+            TelemetryWrapper.recordEvent(category: .appExtensionAction, method: .applicationOpenUrl, object: object)
         }
 
         DispatchQueue.main.async {
-            NavigationPath.handle(nav: routerpath, with: self.browserViewController)
+            NavigationPath.handle(nav: routerpath, with: BrowserViewController.foregroundBVC())
         }
         return true
     }
@@ -262,39 +302,50 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UIViewControllerRestorati
 
         let defaults = UserDefaults()
         defaults.set(false, forKey: "ApplicationCleanlyBackgrounded")
-        defaults.synchronize()
 
         if let profile = self.profile {
             profile._reopen()
 
             if profile.prefs.boolForKey(PendingAccountDisconnectedKey) ?? false {
-                FxALoginHelper.sharedInstance.applicationDidDisconnect(application)
+                profile.removeAccount()
             }
 
             profile.syncManager.applicationDidBecomeActive()
 
             setUpWebServer(profile)
         }
-
-        // We could load these here, but then we have to futz with the tab counter
-        // and making NSURLRequests.
-        browserViewController.loadQueuedTabs(receivedURLs: receivedURLs)
-        receivedURLs.removeAll()
-        application.applicationIconBadgeNumber = 0
-
+        
+        BrowserViewController.foregroundBVC().firefoxHomeViewController?.reloadAll()
+        
         // Resume file downloads.
-        browserViewController.downloadQueue.resumeAll()
+        // TODO: iOS 13 needs to iterate all the BVCs.
+        BrowserViewController.foregroundBVC().downloadQueue.resumeAll()
 
         // handle quick actions is available
         let quickActions = QuickActions.sharedInstance
         if let shortcut = quickActions.launchedShortcutItem {
             // dispatch asynchronously so that BVC is all set up for handling new tabs
             // when we try and open them
-            quickActions.handleShortCutItem(shortcut, withBrowserViewController: browserViewController)
+            quickActions.handleShortCutItem(shortcut, withBrowserViewController: BrowserViewController.foregroundBVC())
             quickActions.launchedShortcutItem = nil
         }
 
-        UnifiedTelemetry.recordEvent(category: .action, method: .foreground, object: .app)
+        TelemetryWrapper.recordEvent(category: .action, method: .foreground, object: .app)
+
+        // Delay these operations until after UIKit/UIApp init is complete
+        // - loadQueuedTabs accesses the DB and shows up as a hot path in profiling
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            // We could load these here, but then we have to futz with the tab counter
+            // and making NSURLRequests.
+            BrowserViewController.foregroundBVC().loadQueuedTabs(receivedURLs: self.receivedURLs)
+            self.receivedURLs.removeAll()
+            application.applicationIconBadgeNumber = 0
+        }
+
+        // Cleanup can be a heavy operation, take it out of the startup path. Instead check after a few seconds.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
+            self.profile?.cleanupHistoryIfNeeded()
+        }
     }
 
     func applicationDidEnterBackground(_ application: UIApplication) {
@@ -306,14 +357,12 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UIViewControllerRestorati
 
         let defaults = UserDefaults()
         defaults.set(true, forKey: "ApplicationCleanlyBackgrounded")
-        defaults.synchronize()
 
         // Pause file downloads.
-        browserViewController.downloadQueue.pauseAll()
+        // TODO: iOS 13 needs to iterate all the BVCs.
+        BrowserViewController.foregroundBVC().downloadQueue.pauseAll()
 
-        syncOnDidEnterBackground(application: application)
-
-        UnifiedTelemetry.recordEvent(category: .action, method: .background, object: .app)
+        TelemetryWrapper.recordEvent(category: .action, method: .background, object: .app)
 
         let singleShotTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.main)
         // 2 seconds is ample for a localhost request to be completed by GCDWebServer. <500ms is expected on newer devices.
@@ -324,6 +373,12 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UIViewControllerRestorati
         }
         singleShotTimer.resume()
         shutdownWebServer = singleShotTimer
+
+        if #available(iOS 13.0, *) {
+            scheduleBGSync(application: application)
+        } else {
+            syncOnDidEnterBackground(application: application)
+        }
     }
 
     fileprivate func syncOnDidEnterBackground(application: UIApplication) {
@@ -333,6 +388,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UIViewControllerRestorati
 
         profile.syncManager.applicationDidEnterBackground()
 
+        // Create an expiring background task. This allows plenty of time for db locks to be released
+        // async. Otherwise we are getting crashes due to db locks not released yet.
         var taskId: UIBackgroundTaskIdentifier = UIBackgroundTaskIdentifier(rawValue: 0)
         taskId = application.beginBackgroundTask (expirationHandler: {
             print("Running out of background time, but we have a profile shutdown pending.")
@@ -407,13 +464,11 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UIViewControllerRestorati
     }
 
     fileprivate func setUserAgent() {
-        let firefoxUA = UserAgent.defaultUserAgent()
+        let firefoxUA = UserAgent.getUserAgent()
 
         // Set the UA for WKWebView (via defaults), the favicon fetcher, and the image loader.
         // This only needs to be done once per runtime. Note that we use defaults here that are
         // readable from extensions, so they can just use the cached identifier.
-        let defaults = UserDefaults(suiteName: AppInfo.sharedContainerIdentifier)!
-        defaults.register(defaults: ["UserAgent": firefoxUA])
 
         SDWebImageDownloader.shared.setValue(firefoxUA, forHTTPHeaderField: "User-Agent")
         //SDWebImage is setting accept headers that report we support webp. We don't
@@ -428,9 +483,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UIViewControllerRestorati
     }
 
     func application(_ application: UIApplication, continue userActivity: NSUserActivity, restorationHandler: @escaping ([UIUserActivityRestoring]?) -> Void) -> Bool {
+        let bvc = BrowserViewController.foregroundBVC()
         if #available(iOS 12.0, *) {
             if userActivity.activityType == SiriShortcuts.activityType.openURL.rawValue {
-                browserViewController.openBlankNewTab(focusLocationField: false)
+                bvc.openBlankNewTab(focusLocationField: false)
                 return true
             }
         }
@@ -442,7 +498,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UIViewControllerRestorati
 
             // Check for fxa sign-in code and launch the login screen directly
             if query["signin"] != nil {
-                browserViewController.launchFxAFromDeeplinkURL(url)
+                bvc.launchFxAFromDeeplinkURL(url)
                 return true
             }
 
@@ -450,11 +506,11 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UIViewControllerRestorati
             // it is recommended that links contain the `deep_link` query parameter. This link will also
             // be url encoded.
             if let deepLink = query["deep_link"]?.removingPercentEncoding, let url = URL(string: deepLink) {
-                browserViewController.switchToTabForURLOrOpen(url, isPrivileged: true)
+                bvc.switchToTabForURLOrOpen(url)
                 return true
             }
 
-            browserViewController.switchToTabForURLOrOpen(url, isPrivileged: true)
+            bvc.switchToTabForURLOrOpen(url)
             return true
         }
 
@@ -464,7 +520,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UIViewControllerRestorati
             if let userInfo = userActivity.userInfo,
                 let urlString = userInfo[CSSearchableItemActivityIdentifier] as? String,
                 let url = URL(string: urlString) {
-                browserViewController.switchToTabForURLOrOpen(url, isPrivileged: true)
+                bvc.switchToTabForURLOrOpen(url)
                 return true
             }
         }
@@ -472,25 +528,39 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UIViewControllerRestorati
         return false
     }
 
-    fileprivate func openURLsInNewTabs(_ notification: UNNotification) {
-        guard let urls = notification.request.content.userInfo["sentTabs"] as? [NSDictionary]  else { return }
-        for sentURL in urls {
-            if let urlString = sentURL.value(forKey: "url") as? String, let url = URL(string: urlString) {
-                receivedURLs.append(url)
-            }
-        }
-
-        // Check if the app is foregrounded, _also_ verify the BVC is initialized. Most BVC functions depend on viewDidLoad() having run –if not, they will crash.
-        if UIApplication.shared.applicationState == .active && browserViewController.isViewLoaded {
-            browserViewController.loadQueuedTabs(receivedURLs: receivedURLs)
-            receivedURLs.removeAll()
-        }
-    }
-
     func application(_ application: UIApplication, performActionFor shortcutItem: UIApplicationShortcutItem, completionHandler: @escaping (Bool) -> Void) {
-        let handledShortCutItem = QuickActions.sharedInstance.handleShortCutItem(shortcutItem, withBrowserViewController: browserViewController)
+        let handledShortCutItem = QuickActions.sharedInstance.handleShortCutItem(shortcutItem, withBrowserViewController: BrowserViewController.foregroundBVC())
 
         completionHandler(handledShortCutItem)
+    }
+
+    @available(iOS 13.0, *)
+    private func scheduleBGSync(application: UIApplication) {
+        if profile?.syncManager.isSyncing ?? false {
+            // If syncing, create a bg task because _shutdown() is blocking and might take a few seconds to complete
+            var taskId = UIBackgroundTaskIdentifier(rawValue: 0)
+            taskId = application.beginBackgroundTask(expirationHandler: {
+                self.shutdownProfileWhenNotActive(application)
+                application.endBackgroundTask(taskId)
+            })
+
+            DispatchQueue.main.async {
+                self.shutdownProfileWhenNotActive(application)
+                application.endBackgroundTask(taskId)
+            }
+        } else {
+            // Blocking call, however without sync running it should be instantaneous
+            profile?._shutdown()
+
+            let request = BGProcessingTaskRequest(identifier: "org.mozilla.ios.sync.part1")
+            request.earliestBeginDate = Date(timeIntervalSinceNow: 1)
+            request.requiresNetworkConnectivity = true
+            do {
+                try BGTaskScheduler.shared.submit(request)
+            } catch {
+                NSLog(error.localizedDescription)
+            }
+        }
     }
 }
 
@@ -516,183 +586,8 @@ extension AppDelegate: MFMailComposeViewControllerDelegate {
     }
 }
 
-extension AppDelegate: UNUserNotificationCenterDelegate {
-    // Called when the user taps on a sent-tab notification from the background.
-    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
-        openURLsInNewTabs(response.notification)
-    }
-
-    // Called when the user receives a tab while in foreground.
-    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        openURLsInNewTabs(notification)
-    }
-}
-
-extension AppDelegate {
-    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
-        FxALoginHelper.sharedInstance.apnsRegisterDidSucceed(deviceToken)
-    }
-
-    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
-        print("failed to register. \(error)")
-        FxALoginHelper.sharedInstance.apnsRegisterDidFail()
-    }
-
-    func application(_ application: UIApplication, didReceiveRemoteNotification userInfo: [AnyHashable: Any], fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {
-        if Logger.logPII && log.isEnabledFor(level: .info) {
-            NSLog("APNS NOTIFICATION \(userInfo)")
-        }
-
-        // At this point, we know that NotificationService has been run.
-        // We get to this point if the notification was received while the app was in the foreground
-        // OR the app was backgrounded and now the user has tapped on the notification.
-        // Either way, if this method is being run, then the app is foregrounded.
-
-        // Either way, we should zero the badge number.
-        application.applicationIconBadgeNumber = 0
-
-        guard let profile = self.profile else {
-            return completionHandler(.noData)
-        }
-
-        // NotificationService will have decrypted the push message, and done some syncing
-        // activity. If the `client` collection was synced, and there are `displayURI` commands (i.e. sent tabs)
-        // NotificationService will have collected them for us in the userInfo.
-        if let serializedTabs = userInfo["sentTabs"] as? [NSDictionary] {
-            // Let's go ahead and open those.
-            for item in serializedTabs {
-                if let urlString = item["url"] as? String, let url = URL(string: urlString) {
-                    receivedURLs.append(url)
-                }
-            }
-
-            if receivedURLs.count > 0 {
-                // If we're in the foreground, load the queued tabs now.
-                if application.applicationState == .active {
-                    DispatchQueue.main.async {
-                        self.browserViewController.loadQueuedTabs(receivedURLs: self.receivedURLs)
-                        self.receivedURLs.removeAll()
-                    }
-                }
-
-                return completionHandler(.newData)
-            }
-        }
-
-        // By now, we've dealt with any sent tab notifications.
-        //
-        // The only thing left to do now is to perform actions that can only be performed
-        // while the app is foregrounded.
-        //
-        // Use the push message handler to re-parse the message,
-        // this time with a BrowserProfile and processing the return
-        // differently than in NotificationService.
-        let handler = FxAPushMessageHandler(with: profile)
-        handler.handle(userInfo: userInfo).upon { res in
-            if let message = res.successValue {
-                switch message {
-                case .accountVerified:
-                    _ = handler.postVerification()
-                case .thisDeviceDisconnected:
-                    FxALoginHelper.sharedInstance.applicationDidDisconnect(application)
-                default:
-                    break
-                }
-            }
-
-            completionHandler(res.isSuccess ? .newData : .failed)
-        }
-    }
-
-    func application(_ application: UIApplication, didReceiveRemoteNotification userInfo: [AnyHashable: Any]) {
-        let completionHandler: (UIBackgroundFetchResult) -> Void = { _ in }
-        self.application(application, didReceiveRemoteNotification: userInfo, fetchCompletionHandler: completionHandler)
-    }
-}
-
 extension UIApplication {
-    var syncDelegate: SyncDelegate {
-        return AppSyncDelegate(app: self)
-    }
-
     static var isInPrivateMode: Bool {
-        let appDelegate = UIApplication.shared.delegate as? AppDelegate
-        return appDelegate?.browserViewController.tabManager.selectedTab?.isPrivate ?? false
-    }
-}
-
-class AppSyncDelegate: SyncDelegate {
-    let app: UIApplication
-
-    init(app: UIApplication) {
-        self.app = app
-    }
-
-    open func displaySentTab(for url: URL, title: String, from deviceName: String?) {
-        DispatchQueue.main.sync {
-            if let appDelegate = app.delegate as? AppDelegate, app.applicationState == .active {
-                appDelegate.browserViewController.switchToTabForURLOrOpen(url, isPrivileged: false)
-                return
-            }
-
-            // check to see what the current notification settings are and only try and send a notification if
-            // the user has agreed to them
-            UNUserNotificationCenter.current().getNotificationSettings { settings in
-                if settings.alertSetting == .enabled {
-                    if Logger.logPII {
-                        log.info("Displaying notification for URL \(url.absoluteString)")
-                    }
-
-                    let notificationContent = UNMutableNotificationContent()
-                    let title: String
-                    if let deviceName = deviceName {
-                        title = String(format: Strings.SentTab_TabArrivingNotification_WithDevice_title, deviceName)
-                    } else {
-                        title = Strings.SentTab_TabArrivingNotification_NoDevice_title
-                    }
-                    notificationContent.title = title
-                    notificationContent.body = url.absoluteDisplayExternalString
-                    notificationContent.userInfo = [SentTabAction.TabSendURLKey: url.absoluteString, SentTabAction.TabSendTitleKey: title]
-                    notificationContent.categoryIdentifier = "org.mozilla.ios.SentTab.placeholder"
-
-                    // `timeInterval` must be greater than zero
-                    let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 0.1, repeats: false)
-
-                    // The identifier for each notification request must be unique in order to be created
-                    let requestIdentifier = "\(SentTabAction.TabSendCategory).\(url.absoluteString)"
-                    let request = UNNotificationRequest(identifier: requestIdentifier, content: notificationContent, trigger: trigger)
-
-                    UNUserNotificationCenter.current().add(request) { error in
-                        if let error = error {
-                            log.error(error.localizedDescription)
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/**
- * This exists because the Sync code is extension-safe, and thus doesn't get
- * direct access to UIApplication.sharedApplication, which it would need to
- * display a notification.
- * This will also likely be the extension point for wipes, resets, and
- * getting access to data sources during a sync.
- */
-
-enum SentTabAction: String {
-    case view = "TabSendViewAction"
-
-    static let TabSendURLKey = "TabSendURL"
-    static let TabSendTitleKey = "TabSendTitle"
-    static let TabSendCategory = "TabSendCategory"
-
-    static func registerActions() {
-        let viewAction = UNNotificationAction(identifier: SentTabAction.view.rawValue, title: Strings.SentTabViewActionTitle, options: .foreground)
-
-        // Register ourselves to handle the notification category set by NotificationService for APNS notifications
-        let sentTabCategory = UNNotificationCategory(identifier: "org.mozilla.ios.SentTab.placeholder", actions: [viewAction], intentIdentifiers: [], options: UNNotificationCategoryOptions(rawValue: 0))
-        UNUserNotificationCenter.current().setNotificationCategories([sentTabCategory])
+        return BrowserViewController.foregroundBVC().tabManager.selectedTab?.isPrivate ?? false
     }
 }

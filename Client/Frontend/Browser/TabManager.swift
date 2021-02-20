@@ -63,9 +63,10 @@ class TabManager: NSObject {
 
     fileprivate let navDelegate: TabManagerNavDelegate
 
-    public static func makeWebViewConfig(isPrivate: Bool, blockPopups: Bool) -> WKWebViewConfiguration {
+    public static func makeWebViewConfig(isPrivate: Bool, prefs: Prefs?) -> WKWebViewConfiguration {
         let configuration = WKWebViewConfiguration()
         configuration.processPool = WKProcessPool()
+        let blockPopups = prefs?.boolForKey(PrefsKeys.KeyBlockPopups) ?? true
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = !blockPopups
         // We do this to go against the configuration of the <meta name="viewport">
         // tag to behave the same way as Safari :-(
@@ -73,21 +74,18 @@ class TabManager: NSObject {
         if isPrivate {
             configuration.websiteDataStore = WKWebsiteDataStore.nonPersistent()
         }
-
         configuration.setURLSchemeHandler(InternalSchemeHandler(), forURLScheme: InternalURL.scheme)
         return configuration
     }
 
     // A WKWebViewConfiguration used for normal tabs
     lazy fileprivate var configuration: WKWebViewConfiguration = {
-        let blockPopups = profile.prefs.boolForKey("blockPopups") ?? true
-        return TabManager.makeWebViewConfig(isPrivate: false, blockPopups: blockPopups)
+        return TabManager.makeWebViewConfig(isPrivate: false, prefs: profile.prefs)
     }()
 
     // A WKWebViewConfiguration used for private mode tabs
     lazy fileprivate var privateConfiguration: WKWebViewConfiguration = {
-        let blockPopups = profile.prefs.boolForKey("blockPopups") ?? true
-        return TabManager.makeWebViewConfig(isPrivate: true, blockPopups: blockPopups)
+        return TabManager.makeWebViewConfig(isPrivate: true, prefs: profile.prefs)
     }()
 
     var selectedIndex: Int { return _selectedIndex }
@@ -210,7 +208,7 @@ class TabManager: NSObject {
         }
         if let tab = selectedTab {
             TabEvent.post(.didGainFocus, for: tab)
-            UITextField.appearance().keyboardAppearance = tab.isPrivate ? .dark : .light
+            tab.applyTheme()
         }
     }
 
@@ -225,7 +223,7 @@ class TabManager: NSObject {
         recentlyClosedForUndo.removeAll()
 
         // Clear every time entering/exiting this mode.
-        Tab.DesktopSites.privateModeHostList = Set<String>()
+        Tab.ChangeUserAgent.privateModeHostList = Set<String>()
 
         if shouldClearPrivateTabs() && leavingPBM {
             removeAllPrivateTabs()
@@ -240,8 +238,8 @@ class TabManager: NSObject {
         }
     }
 
-    func addPopupForParentTab(_ parentTab: Tab, configuration: WKWebViewConfiguration) -> Tab {
-        let popup = Tab(configuration: configuration, isPrivate: parentTab.isPrivate)
+    func addPopupForParentTab(bvc: BrowserViewController, parentTab: Tab, configuration: WKWebViewConfiguration) -> Tab {
+        let popup = Tab(bvc: bvc, configuration: configuration, isPrivate: parentTab.isPrivate)
         configureTab(popup, request: nil, afterTab: parentTab, flushToDisk: true, zombie: false, isPopup: true)
 
         // Wait momentarily before selecting the new tab, otherwise the parent tab
@@ -285,7 +283,8 @@ class TabManager: NSObject {
         // Take the given configuration. Or if it was nil, take our default configuration for the current browsing mode.
         let configuration: WKWebViewConfiguration = configuration ?? (isPrivate ? privateConfiguration : self.configuration)
 
-        let tab = Tab(configuration: configuration, isPrivate: isPrivate)
+        let bvc = BrowserViewController.foregroundBVC()
+        let tab = Tab(bvc: bvc, configuration: configuration, isPrivate: isPrivate)
         configureTab(tab, request: request, afterTab: afterTab, flushToDisk: flushToDisk, zombie: zombie)
         return tab
     }
@@ -316,6 +315,10 @@ class TabManager: NSObject {
     func configureTab(_ tab: Tab, request: URLRequest?, afterTab parent: Tab? = nil, flushToDisk: Bool, zombie: Bool, isPopup: Bool = false) {
         assert(Thread.isMainThread)
 
+        // If network is not available webView(_:didCommit:) is not going to be called
+        // We should set request url in order to show url in url bar even no network
+        tab.url = request?.url
+        
         if parent == nil || parent?.isPrivate != tab.isPrivate {
             tabs.append(tab)
         } else if let parent = parent, var insertIndex = tabs.firstIndex(of: parent) {
@@ -360,6 +363,10 @@ class TabManager: NSObject {
                 }
             }
         }
+
+        tab.nightMode = NightModeHelper.isActivated(profile.prefs)
+        tab.noImageMode = NoImageModeHelper.isActivated(profile.prefs)
+
         if flushToDisk {
         	storeChanges()
         }
@@ -391,6 +398,13 @@ class TabManager: NSObject {
         removeTab(tab, flushToDisk: true, notify: true)
         updateIndexAfterRemovalOf(tab, deletedIndex: index)
         hideNetworkActivitySpinner()
+
+        TelemetryWrapper.recordEvent(
+            category: .action,
+            method: .close,
+            object: .tab,
+            value: tab.isPrivate ? .privateTab : .normalTab
+        )
     }
 
     private func updateIndexAfterRemovalOf(_ tab: Tab, deletedIndex: Int) {
@@ -431,7 +445,11 @@ class TabManager: NSObject {
         tabs.remove(at: removalIndex)
         assert(count == prevCount - 1, "Make sure the tab count was actually removed")
 
-        tab.closeAndRemovePrivateBrowsingData()
+        if (tab.isPrivate && privateTabs.count < 1) {
+            privateConfiguration = TabManager.makeWebViewConfig(isPrivate: true, prefs: profile.prefs)
+        }
+
+        tab.close()
 
         if notify {
             delegates.forEach { $0.get()?.tabManager(self, didRemoveTab: tab, isRestoring: store.isRestoringTabs) }
@@ -462,8 +480,10 @@ class TabManager: NSObject {
         if selectedTab?.isPrivate ?? false {
             _selectedIndex = -1
         }
-        privateTabs.forEach { $0.closeAndRemovePrivateBrowsingData() }
+        privateTabs.forEach { $0.close() }
         tabs = normalTabs
+
+        privateConfiguration = TabManager.makeWebViewConfig(isPrivate: true, prefs: profile.prefs)
     }
 
     func removeTabsWithUndoToast(_ tabs: [Tab]) {
@@ -540,7 +560,7 @@ class TabManager: NSObject {
 
     @objc func prefsDidChange() {
         DispatchQueue.main.async {
-            let allowPopups = !(self.profile.prefs.boolForKey("blockPopups") ?? true)
+            let allowPopups = !(self.profile.prefs.boolForKey(PrefsKeys.KeyBlockPopups) ?? true)
             // Each tab may have its own configuration, so we should tell each of them in turn.
             for tab in self.tabs {
                 tab.webView?.configuration.preferences.javaScriptCanOpenWindowsAutomatically = allowPopups
@@ -621,11 +641,6 @@ extension TabManager: WKNavigationDelegate {
     // Do not excute JS at this point that requires running prior to DOM parsing.
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         guard let tab = self[webView] else { return }
-        let isNightMode = NightModeAccessors.isNightMode(profile.prefs)
-        tab.setNightMode(isNightMode)
-
-        let isNoImageMode = profile.prefs.boolForKey(PrefsKeys.KeyNoImageModeStatus) ?? false
-        tab.noImageMode = isNoImageMode
 
         if let tpHelper = tab.contentBlocker, !tpHelper.isEnabled {
             webView.evaluateJavaScript("window.__firefox__.TrackingProtectionStats.setEnabled(false, \(UserScriptManager.securityToken))")

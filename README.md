@@ -1,16 +1,12 @@
-Firefox for iOS [![codebeat badge](https://codebeat.co/badges/67e58b6d-bc89-4f22-ba8f-7668a9c15c5a)](https://codebeat.co/projects/github-com-mozilla-firefox-ios) [![BuddyBuild](https://dashboard.buddybuild.com/api/statusImage?appID=57bf25c0f096bc01001e21e0&branch=master&build=latest)](https://dashboard.buddybuild.com/apps/57bf25c0f096bc01001e21e0/build/latest) [![codecov](https://codecov.io/gh/mozilla-mobile/firefox-ios/branch/master/graph/badge.svg)](https://codecov.io/gh/mozilla-mobile/firefox-ios/branch/master)
+Firefox for iOS [![codebeat badge](https://codebeat.co/badges/67e58b6d-bc89-4f22-ba8f-7668a9c15c5a)](https://codebeat.co/projects/github-com-mozilla-firefox-ios) [![BuddyBuild](https://dashboard.buddybuild.com/api/statusImage?appID=57bf25c0f096bc01001e21e0&branch=main&build=latest)](https://dashboard.buddybuild.com/apps/57bf25c0f096bc01001e21e0/build/latest) [![codecov](https://codecov.io/gh/mozilla-mobile/firefox-ios/branch/main/graph/badge.svg)](https://codecov.io/gh/mozilla-mobile/firefox-ios/branch/main)
 ===============
 
 Download on the [App Store](https://itunes.apple.com/app/firefox-web-browser/id989804926).
 
-This branch (master)
+This branch (main)
 -----------
 
-This branch is for mainline development that will ship in *v17.0*.
-
-This branch only works with Xcode 10.2.x and supports iOS 11.0 and above
-
-This branch is written in Swift 4.2
+This branch only works with [Xcode 11.5](https://developer.apple.com/services-account/download?path=/Developer_Tools/Xcode_11.5/Xcode_11.5.xip), Swift 5.2 and supports iOS 12.0 and above.
 
 Please make sure you aim your pull requests in the right direction.
 
@@ -25,10 +21,11 @@ Building the code
 -----------------
 
 1. Install the latest [Xcode developer tools](https://developer.apple.com/xcode/downloads/) from Apple.
-1. Install Carthage
+1. Install Carthage and Node
     ```shell
     brew update
     brew install carthage
+    brew install node
     ```
 1. Clone the repository:
     ```shell
@@ -72,22 +69,6 @@ To simplify the build process, these compiled files are checked-in to this repos
 npm run build
 ```
 
-## Contributor guidelines
+## Contributing
 
-### Creating a pull request
-* All pull requests must be associated with a specific Issue. If an issue doesn't exist please first create it.
-
-### Swift style
-* Swift code should generally follow the conventions listed at https://github.com/raywenderlich/swift-style-guide.
-  * Exception: we use 4-space indentation instead of 2.
-  * This is a loose standard. We do our best to follow this style
-
-### Whitespace
-* New code should not contain any trailing whitespace.
-* We recommend enabling both the "Automatically trim trailing whitespace" and "Including whitespace-only lines" preferences in Xcode (under Text Editing).
-* <code>git rebase --whitespace=fix</code> can also be used to remove whitespace from your commits before issuing a pull request.
-
-### Commits
-* Each commit should have a single clear purpose. If a commit contains multiple unrelated changes, those changes should be split into separate commits.
-* If a commit requires another commit to build properly, those commits should be squashed.
-* Follow-up commits for any review comments should be squashed. Do not include "Fixed PR comments", merge commits, or other "temporary" commits in pull requests.
+Want to contribute to this repository? Check out [Contributing Guidelines](https://github.com/mozilla-mobile/firefox-ios/blob/main/CONTRIBUTING.md)

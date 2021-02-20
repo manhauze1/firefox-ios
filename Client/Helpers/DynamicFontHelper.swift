@@ -21,7 +21,7 @@ class DynamicFontHelper: NSObject {
         defaultStandardFontSize = UIFontDescriptor.preferredFontDescriptor(withTextStyle: .body).pointSize // 14pt -> 17pt -> 23pt
         deviceFontSize = defaultStandardFontSize * (UIDevice.current.userInterfaceIdiom == .pad ? iPadFactor : iPhoneFactor)
         defaultMediumFontSize = UIFontDescriptor.preferredFontDescriptor(withTextStyle: .footnote).pointSize // 12pt -> 13pt -> 19pt
-        defaultSmallFontSize = UIFontDescriptor.preferredFontDescriptor(withTextStyle: .caption2).pointSize // 11pt -> 11pt -> 17pt
+        defaultSmallFontSize = UIFontDescriptor.preferredFontDescriptor(withTextStyle: .caption1).pointSize // 11pt -> 12pt -> 17pt
 
         super.init()
     }
@@ -109,6 +109,11 @@ class DynamicFontHelper: NSObject {
     var MediumSizeBoldFontAS: UIFont {
         let size = min(deviceFontSize, 18)
         return UIFont.boldSystemFont(ofSize: size)
+    }
+    
+    var LargeSizeHeavyFontAS: UIFont {
+        let size = min(deviceFontSize + 2, 20)
+        return UIFont.systemFont(ofSize: size, weight: UIFont.Weight.heavy)
     }
 
     var SmallSizeHeavyWeightAS: UIFont {

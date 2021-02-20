@@ -51,6 +51,7 @@ class TopTabsViewController: UIViewController {
         tabsButton.semanticContentAttribute = .forceLeftToRight
         tabsButton.addTarget(self, action: #selector(TopTabsViewController.tabsTrayTapped), for: .touchUpInside)
         tabsButton.accessibilityIdentifier = "TopTabsViewController.tabsButton"
+        tabsButton.inTopTabs = true
         return tabsButton
     }()
 
@@ -94,7 +95,8 @@ class TopTabsViewController: UIViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-
+        view.setNeedsLayout()
+        view.layoutIfNeeded()
         tabDisplayManager.refreshStore(evenIfHidden: true)
     }
 

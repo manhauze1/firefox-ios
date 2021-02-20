@@ -10,11 +10,13 @@ public enum SentryTag: String {
     case browserDB = "BrowserDB"
     case rustPlaces = "RustPlaces"
     case rustLogins = "RustLogins"
+    case rustLog = "RustLog"
     case notificationService = "NotificationService"
     case unifiedTelemetry = "UnifiedTelemetry"
     case general = "General"
     case tabManager = "TabManager"
     case bookmarks = "Bookmarks"
+    case leanplum = "Leanplum"
 }
 
 public class Sentry {
@@ -46,7 +48,16 @@ public class Sentry {
             return
         }
 
-        guard let dsn = Bundle.main.object(forInfoDictionaryKey: SentryDSNKey) as? String, !dsn.isEmpty else {
+        var bundle = Bundle.main
+        if bundle.bundleURL.pathExtension == "appex" {
+            // Peel off two directory levels - MY_APP.app/PlugIns/MY_APP_EXTENSION.appex
+            let url = bundle.bundleURL.deletingLastPathComponent().deletingLastPathComponent()
+            if let extensionBundle = Bundle(url: url) {
+                bundle = extensionBundle
+            }
+        }
+
+        guard let dsn = bundle.object(forInfoDictionaryKey: SentryDSNKey) as? String, !dsn.isEmpty else {
             Logger.browserLogger.debug("Not enabling Sentry; Not configured in Info.plist")
             return
         }
@@ -63,7 +74,6 @@ public class Sentry {
             // be used for both the main application and the app extensions.
             if let defaults = UserDefaults(suiteName: AppInfo.sharedContainerIdentifier), defaults.string(forKey: SentryDeviceAppHashKey) == nil {
                 defaults.set(Bytes.generateRandomBytes(DeviceAppHashLength).hexEncodedString, forKey: SentryDeviceAppHashKey)
-                defaults.synchronize()
             }
 
             // For all outgoing reports, override the default device identifier with our own random
@@ -80,6 +90,9 @@ public class Sentry {
             Logger.browserLogger.error("Failed to initialize Sentry: \(error)")
         }
 
+        // Ignore SIGPIPE exceptions globally.
+        // https://stackoverflow.com/questions/108183/how-to-prevent-sigpipes-or-handle-them-properly
+        signal(SIGPIPE, SIG_IGN)
     }
 
     public func crash() {

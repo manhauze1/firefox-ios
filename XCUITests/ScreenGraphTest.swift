@@ -13,7 +13,7 @@ class ScreenGraphTest: XCTestCase {
         app = XCUIApplication()
         navigator = createTestGraph(for: self, with: app).navigator()
         app.terminate()
-        app.launchArguments = [LaunchArguments.Test, LaunchArguments.ClearProfile, LaunchArguments.SkipIntro, LaunchArguments.SkipWhatsNew]
+        app.launchArguments = [LaunchArguments.Test, LaunchArguments.ClearProfile, LaunchArguments.SkipIntro, LaunchArguments.SkipWhatsNew, LaunchArguments.SkipETPCoverSheet]
         app.activate()
     }
 }
@@ -27,6 +27,7 @@ extension XCTestCase {
 }
 
 extension ScreenGraphTest {
+    // Temoporary disable since it is failing intermittently on BB
     func testUserStateChanges() {
         XCTAssertNil(navigator.userState.url, "Current url is empty")
 
@@ -165,7 +166,7 @@ fileprivate class TestActions {
     static let LoadURLByPasting = "LoadURLByPasting"
 }
 
-var isTablet: Bool {
+public var isTablet: Bool {
     // There is more value in a variable having the same name,
     // so it can be used in both predicates and in code
     // than avoiding the duplication of one line of code.

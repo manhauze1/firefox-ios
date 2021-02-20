@@ -15,6 +15,7 @@ import MobileCoreServices
 import SDWebImage
 import SwiftyJSON
 import Telemetry
+import Glean
 import Sentry
 
 private let KVOs: [KVOConstants] = [
@@ -34,6 +35,14 @@ private struct BrowserViewControllerUX {
     fileprivate static let BookmarkStarAnimationOffset: CGFloat = 80
 }
 
+/// Enum used to track flow for telemetry events
+enum ReferringPage {
+    case onboarding
+    case appMenu
+    case settings
+    case none
+}
+
 class BrowserViewController: UIViewController {
     var firefoxHomeViewController: FirefoxHomeViewController?
     var libraryViewController: LibraryViewController?
@@ -43,7 +52,7 @@ class BrowserViewController: UIViewController {
     var clipboardBarDisplayHandler: ClipboardBarDisplayHandler?
     var readerModeBar: ReaderModeBarView?
     var readerModeCache: ReaderModeCache
-    var statusBarOverlay: UIView!
+    var statusBarOverlay: UIView = UIView()
     fileprivate(set) var toolbar: TabToolbar?
     var searchController: SearchViewController?
     var screenshotHelper: ScreenshotHelper!
@@ -51,19 +60,10 @@ class BrowserViewController: UIViewController {
     fileprivate var searchLoader: SearchLoader?
     let alertStackView = UIStackView() // All content that appears above the footer should be added to this view. (Find In Page/SnackBars)
     var findInPageBar: FindInPageBar?
-
+    private var onboardingUserResearch: OnboardingUserResearch?
     lazy var mailtoLinkHandler = MailtoLinkHandler()
 
-    lazy fileprivate var customSearchEngineButton: UIButton = {
-        let searchButton = UIButton()
-        searchButton.setImage(UIImage(named: "AddSearch")?.withRenderingMode(.alwaysTemplate), for: [])
-        searchButton.addTarget(self, action: #selector(addCustomSearchEngineForFocusedElement), for: .touchUpInside)
-        searchButton.accessibilityIdentifier = "BrowserViewController.customSearchEngineButton"
-        return searchButton
-    }()
-
     fileprivate var customSearchBarButton: UIBarButtonItem?
-    private weak var currentBookmarksKeywordQuery: CancellableDeferred<Maybe<String>>?
 
     // popover rotation handling
     var displayedPopoverController: UIViewController?
@@ -76,7 +76,7 @@ class BrowserViewController: UIViewController {
     fileprivate var pasteAction: AccessibleAction!
     fileprivate var copyAddressAction: AccessibleAction!
 
-    fileprivate weak var tabTrayController: TabTrayController?
+    fileprivate weak var tabTrayController: TabTrayControllerV1?
     let profile: Profile
     let tabManager: TabManager
 
@@ -94,7 +94,7 @@ class BrowserViewController: UIViewController {
     var scrollController = TabScrollingController()
 
     fileprivate var keyboardState: KeyboardState?
-
+    var hasTriedToPresentETPAlready = false
     var pendingToast: Toast? // A toast that might be waiting for BVC to appear before displaying
     var downloadToast: DownloadToast? // A toast that is showing the combined download progress
 
@@ -130,6 +130,10 @@ class BrowserViewController: UIViewController {
 
     required init?(coder aDecoder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    override var prefersStatusBarHidden: Bool {
+        return false
     }
 
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
@@ -171,7 +175,16 @@ class BrowserViewController: UIViewController {
   }
 
     override var preferredStatusBarStyle: UIStatusBarStyle {
-        return ThemeManager.instance.statusBarStyle
+        guard urlBar != nil else {
+            return ThemeManager.instance.statusBarStyle
+        }
+        
+        // top-tabs are always dark, so special-case this to light
+        if urlBar.topTabsIsShowing {
+            return .lightContent
+        } else {
+            return ThemeManager.instance.statusBarStyle
+        }
     }
 
     @objc func displayThemeChanged(notification: Notification) {
@@ -205,13 +218,26 @@ class BrowserViewController: UIViewController {
         make.right.bottom.left.equalToSuperview()
     }
 
-    fileprivate func updateToolbarStateForTraitCollection(_ newCollection: UITraitCollection, withTransitionCoordinator coordinator: UIViewControllerTransitionCoordinator? = nil) {
+    @objc fileprivate func appMenuBadgeUpdate() {
+        let hideImagesOn = NoImageModeHelper.isActivated(profile.prefs)
+        let showWhatsNew = shouldShowWhatsNew() && !(AppInfo.whatsNewTopic?.isEmpty ?? true)
+        let actionNeeded = RustFirefoxAccounts.shared.isActionNeeded
+        let showWarningBadge = actionNeeded 
+        let showMenuBadge = showWarningBadge ? false : hideImagesOn || showWhatsNew
+
+        urlBar.warningMenuBadge(setVisible: showWarningBadge)
+        urlBar.appMenuBadge(setVisible: showMenuBadge)
+        toolbar?.warningMenuBadge(setVisible: showWarningBadge)
+        toolbar?.appMenuBadge(setVisible: showMenuBadge)
+    }
+
+    func updateToolbarStateForTraitCollection(_ newCollection: UITraitCollection, withTransitionCoordinator coordinator: UIViewControllerTransitionCoordinator? = nil) {
         let showToolbar = shouldShowFooterForTraitCollection(newCollection)
         let showTopTabs = shouldShowTopTabsForTraitCollection(newCollection)
 
         urlBar.topTabsIsShowing = showTopTabs
         urlBar.setShowToolbar(!showToolbar)
-        urlBar.hideImagesBadge(visible: NoImageModeHelper.isActivated(profile.prefs))
+        toolbar?.addNewTabButton.isHidden = showToolbar
         toolbar?.removeFromSuperview()
         toolbar?.tabToolbarDelegate = nil
         toolbar = nil
@@ -222,9 +248,11 @@ class BrowserViewController: UIViewController {
             toolbar?.tabToolbarDelegate = self
             toolbar?.applyUIMode(isPrivate: tabManager.selectedTab?.isPrivate ?? false)
             toolbar?.applyTheme()
-            toolbar?.hideImagesBadge(visible: NoImageModeHelper.isActivated(profile.prefs))
+            toolbar?.addNewTabButton.isHidden = true
             updateTabCountUsingTabManager(self.tabManager)
         }
+
+        appMenuBadgeUpdate()
 
         if showTopTabs {
             if topTabsViewController == nil {
@@ -294,6 +322,7 @@ class BrowserViewController: UIViewController {
 
     @objc func appDidEnterBackgroundNotification() {
         displayedPopoverController?.dismiss(animated: false) {
+            self.updateDisplayedPopoverProperties = nil
             self.displayedPopoverController = nil
         }
     }
@@ -305,6 +334,7 @@ class BrowserViewController: UIViewController {
    @objc  func appWillResignActiveNotification() {
         // Dismiss any popovers that might be visible
         displayedPopoverController?.dismiss(animated: false) {
+            self.updateDisplayedPopoverProperties = nil
             self.displayedPopoverController = nil
         }
 
@@ -314,9 +344,11 @@ class BrowserViewController: UIViewController {
             return
         }
 
+        view.bringSubviewToFront(webViewContainerBackdrop)
         webViewContainerBackdrop.alpha = 1
         webViewContainer.alpha = 0
         urlBar.locationContainer.alpha = 0
+        firefoxHomeViewController?.view.alpha = 0
         topTabsViewController?.switchForegroundStatus(isInForeground: false)
         presentedViewController?.popoverPresentationController?.containerView?.alpha = 0
         presentedViewController?.view.alpha = 0
@@ -328,12 +360,14 @@ class BrowserViewController: UIViewController {
         UIView.animate(withDuration: 0.2, delay: 0, options: UIView.AnimationOptions(), animations: {
             self.webViewContainer.alpha = 1
             self.urlBar.locationContainer.alpha = 1
+            self.firefoxHomeViewController?.view.alpha = 1
             self.topTabsViewController?.switchForegroundStatus(isInForeground: true)
             self.presentedViewController?.popoverPresentationController?.containerView?.alpha = 1
             self.presentedViewController?.view.alpha = 1
             self.view.backgroundColor = UIColor.clear
         }, completion: { _ in
             self.webViewContainerBackdrop.alpha = 0
+            self.view.sendSubviewToBack(self.webViewContainerBackdrop)
         })
 
         // Re-show toolbar which might have been hidden during scrolling (prior to app moving into the background)
@@ -348,7 +382,7 @@ class BrowserViewController: UIViewController {
         KeyboardHelper.defaultHelper.addDelegate(self)
 
         webViewContainerBackdrop = UIView()
-        webViewContainerBackdrop.backgroundColor = UIColor.Photon.Grey50
+        webViewContainerBackdrop.backgroundColor = UIColor.Photon.Ink90
         webViewContainerBackdrop.alpha = 0
         view.addSubview(webViewContainerBackdrop)
 
@@ -421,6 +455,20 @@ class BrowserViewController: UIViewController {
         // links into the view from other apps.
         let dropInteraction = UIDropInteraction(delegate: self)
         view.addInteraction(dropInteraction)
+
+        if !NightModeHelper.isActivated(profile.prefs) {
+            if #available(iOS 13.0, *) {
+                if ThemeManager.instance.systemThemeIsOn {
+                    let userInterfaceStyle = traitCollection.userInterfaceStyle
+                    ThemeManager.instance.current = userInterfaceStyle == .dark ? DarkTheme() : NormalTheme()
+                }
+            }
+        }
+
+        NotificationCenter.default.addObserver(self, selector: #selector(self.appMenuBadgeUpdate), name: .FirefoxAccountStateChange, object: nil)
+        
+        // Setup onboarding user research for A/B testing
+        onboardingUserResearch = OnboardingUserResearch()
     }
 
     fileprivate func setupConstraints() {
@@ -441,7 +489,7 @@ class BrowserViewController: UIViewController {
         }
 
         webViewContainerBackdrop.snp.makeConstraints { make in
-            make.edges.equalTo(webViewContainer)
+            make.edges.equalTo(self.view)
         }
     }
 
@@ -497,7 +545,6 @@ class BrowserViewController: UIViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-
         // On iPhone, if we are about to show the On-Boarding, blank out the tab so that it does
         // not flash before we present. This change of alpha also participates in the animation when
         // the intro view is dismissed.
@@ -545,21 +592,12 @@ class BrowserViewController: UIViewController {
 
     override func viewDidAppear(_ animated: Bool) {
         presentIntroViewController()
-
+        presentETPCoverSheetViewController()
+        presentUpdateViewController()
         screenshotHelper.viewIsVisible = true
         screenshotHelper.takePendingScreenshots(tabManager.tabs)
 
         super.viewDidAppear(animated)
-
-        if shouldShowWhatsNewTab() {
-            // Only display if the SUMO topic has been configured in the Info.plist (present and not empty)
-            if let whatsNewTopic = AppInfo.whatsNewTopic, !whatsNewTopic.isEmpty {
-                if let whatsNewURL = SupportUtils.URLForTopic(whatsNewTopic) {
-                    self.openURLInNewTab(whatsNewURL, isPrivileged: false)
-                    profile.prefs.setString(AppInfo.appVersion, forKey: LatestAppVersionProfileKey)
-                }
-            }
-        }
 
         if let toast = self.pendingToast {
             self.pendingToast = nil
@@ -573,7 +611,7 @@ class BrowserViewController: UIViewController {
     // that value, we compare it to the major version of the running app. If it is different then this is an
     // upgrade, downgrades are not possible, so we can show the What's New page.
 
-    fileprivate func shouldShowWhatsNewTab() -> Bool {
+    func shouldShowWhatsNew() -> Bool {
         guard let latestMajorAppVersion = profile.prefs.stringForKey(LatestAppVersionProfileKey)?.components(separatedBy: ".").first else {
             return false // Clean install, never show What's New
         }
@@ -704,6 +742,7 @@ class BrowserViewController: UIViewController {
             }
         })
         view.setNeedsUpdateConstraints()
+        navigationToolbar.updateIsSearchStatus(true)
     }
 
     fileprivate func hideFirefoxHome() {
@@ -712,6 +751,7 @@ class BrowserViewController: UIViewController {
         }
 
         self.firefoxHomeViewController = nil
+        navigationToolbar.updateIsSearchStatus(false)
         UIView.animate(withDuration: 0.2, delay: 0, options: .beginFromCurrentState, animations: { () -> Void in
             firefoxHomeViewController.view.alpha = 0
         }, completion: { _ in
@@ -819,16 +859,10 @@ class BrowserViewController: UIViewController {
     }
 
     func finishEditingAndSubmit(_ url: URL, visitType: VisitType, forTab tab: Tab) {
-        currentBookmarksKeywordQuery?.cancel()
-
         urlBar.currentURL = url
         urlBar.leaveOverlayMode()
 
-        if let webView = tab.webView {
-            resetSpoofedUserAgentIfRequired(webView, newURL: url)
-        }
-
-        if let nav = tab.loadRequest(PrivilegedRequest(url: url) as URLRequest) {
+        if let nav = tab.loadRequest(URLRequest(url: url)) {
             self.recordNavigationInTab(tab, navigation: nav, visitType: visitType)
         }
     }
@@ -840,7 +874,7 @@ class BrowserViewController: UIViewController {
         }
 
         let shareItem = ShareItem(url: url, title: title, favicon: favicon)
-        _ = profile.places.createBookmark(parentGUID: "mobile______", url: shareItem.url, title: shareItem.title)
+        profile.places.createBookmark(parentGUID: "mobile______", url: shareItem.url, title: shareItem.title)
 
         var userData = [QuickActions.TabURLKey: shareItem.url]
         if let title = shareItem.title {
@@ -889,10 +923,6 @@ class BrowserViewController: UIViewController {
             if tab === tabManager.selectedTab {
                 navigationToolbar.updateReloadStatus(loading)
             }
-
-            if !loading {
-                runScriptsOnWebView(webView)
-            }
         case .URL:
             // To prevent spoofing, only change the URL immediately if the new URL is on
             // the same origin as the current URL. Otherwise, do nothing and wait for
@@ -903,6 +933,9 @@ class BrowserViewController: UIViewController {
                 if tab === tabManager.selectedTab && !tab.restoring {
                     updateUIForReaderHomeStateForTab(tab)
                 }
+                // Catch history pushState navigation, but ONLY for same origin navigation,
+                // for reasons above about URL spoofing risk.
+                navigateInTab(tab: tab)
             }
         case .title:
             // Ensure that the tab title *actually* changed to prevent repeated calls
@@ -927,15 +960,6 @@ class BrowserViewController: UIViewController {
         }
     }
 
-    fileprivate func runScriptsOnWebView(_ webView: WKWebView) {
-        guard let url = webView.url, url.isWebPage(), !InternalURL.isValid(url: url) else {
-            return
-        }
-        if NoImageModeHelper.isActivated(profile.prefs) {
-            webView.evaluateJavaScript("__firefox__.NoImageMode.setEnabled(true)", completionHandler: nil)
-        }
-    }
-
     func updateUIForReaderHomeStateForTab(_ tab: Tab) {
         updateURLBarDisplayURL(tab)
         scrollController.showToolbars(animated: false)
@@ -957,7 +981,7 @@ class BrowserViewController: UIViewController {
     /// Call this whenever the page URL changes.
     fileprivate func updateURLBarDisplayURL(_ tab: Tab) {
         urlBar.currentURL = tab.url?.displayURL
-
+        urlBar.locationView.showLockIcon(forSecureContent:  tab.webView?.hasOnlySecureContent ?? false)
         let isPage = tab.url?.displayURL?.isWebPage() ?? false
         navigationToolbar.updatePageStatus(isPage)
     }
@@ -970,22 +994,22 @@ class BrowserViewController: UIViewController {
         topTabsViewController?.applyUIMode(isPrivate: isPrivate)
     }
 
-    func switchToTabForURLOrOpen(_ url: URL, isPrivate: Bool = false, isPrivileged: Bool) {
+    func switchToTabForURLOrOpen(_ url: URL, isPrivate: Bool = false) {
         popToBVC()
         if let tab = tabManager.getTabForURL(url) {
             tabManager.selectTab(tab)
         } else {
-            openURLInNewTab(url, isPrivate: isPrivate, isPrivileged: isPrivileged)
+            openURLInNewTab(url, isPrivate: isPrivate)
         }
     }
 
-    func openURLInNewTab(_ url: URL?, isPrivate: Bool = false, isPrivileged: Bool) {
+    func openURLInNewTab(_ url: URL?, isPrivate: Bool = false) {
         if let selectedTab = tabManager.selectedTab {
             screenshotHelper.takeScreenshot(selectedTab)
         }
         let request: URLRequest?
         if let url = url {
-            request = isPrivileged ? PrivilegedRequest(url: url) as URLRequest : URLRequest(url: url)
+            request = URLRequest(url: url)
         } else {
             request = nil
         }
@@ -1009,7 +1033,7 @@ class BrowserViewController: UIViewController {
 
     func openBlankNewTab(focusLocationField: Bool, isPrivate: Bool = false, searchFor searchText: String? = nil) {
         popToBVC()
-        openURLInNewTab(nil, isPrivate: isPrivate, isPrivileged: true)
+        openURLInNewTab(nil, isPrivate: isPrivate)
         let freshTab = tabManager.selectedTab
         if focusLocationField {
             focusLocationTextField(forTab: freshTab, setSearchText: searchText)
@@ -1020,7 +1044,7 @@ class BrowserViewController: UIViewController {
         popToBVC()
         let engine = profile.searchEngines.defaultEngine
         if let searchURL = engine.searchURLForQuery(text) {
-            openURLInNewTab(searchURL, isPrivate: isPrivate, isPrivileged: true)
+            openURLInNewTab(searchURL, isPrivate: isPrivate)
         } else {
             // We still don't have a valid URL, so something is broken. Give up.
             print("Error handling URL entry: \"\(text)\".")
@@ -1040,22 +1064,7 @@ class BrowserViewController: UIViewController {
         }
     }
 
-    // MARK: User Agent Spoofing
-
-    func resetSpoofedUserAgentIfRequired(_ webView: WKWebView, newURL: URL) {
-        // Reset the UA when a different domain is being loaded
-        if webView.url?.host != newURL.host {
-            webView.customUserAgent = nil
-        }
-    }
-
-    func restoreSpoofedUserAgentIfRequired(_ webView: WKWebView, newRequest: URLRequest) {
-        // Restore any non-default UA from the request's header
-        let ua = newRequest.value(forHTTPHeaderField: "User-Agent")
-        webView.customUserAgent = ua != UserAgent.defaultUserAgent() ? ua : nil
-    }
-
-    fileprivate func presentActivityViewController(_ url: URL, tab: Tab? = nil, sourceView: UIView?, sourceRect: CGRect, arrowDirection: UIPopoverArrowDirection) {
+    func presentActivityViewController(_ url: URL, tab: Tab? = nil, sourceView: UIView?, sourceRect: CGRect, arrowDirection: UIPopoverArrowDirection) {
         let helper = ShareExtensionHelper(url: url, tab: tab)
 
         let controller = helper.createActivityViewController({ [unowned self] completed, _ in
@@ -1114,11 +1123,12 @@ class BrowserViewController: UIViewController {
         }
 
         if let url = webView.url {
+            if tab === tabManager.selectedTab {
+                urlBar.locationView.showLockIcon(forSecureContent: webView.hasOnlySecureContent)
+            }
+
             if (!InternalURL.isValid(url: url) || url.isReaderModeURL), !url.isFileURL {
                 postLocationChangeNotificationForTab(tab, navigation: navigation)
-
-                // Re-run additional scripts in webView to extract updated favicons and metadata.
-                runScriptsOnWebView(webView)
 
                 webView.evaluateJavaScript("\(ReaderModeNamespace).checkReadability()", completionHandler: nil)
             }
@@ -1146,6 +1156,17 @@ class BrowserViewController: UIViewController {
             }
         }
     }
+
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+
+        if #available(iOS 13.0, *) {
+            if self.traitCollection.hasDifferentColorAppearance(comparedTo: previousTraitCollection), ThemeManager.instance.systemThemeIsOn {
+                let userInterfaceStyle = traitCollection.userInterfaceStyle
+                ThemeManager.instance.current = userInterfaceStyle == .dark ? DarkTheme() : NormalTheme()
+            }
+        }
+    }
 }
 
 extension BrowserViewController: ClipboardBarDisplayHandlerDelegate {
@@ -1158,20 +1179,29 @@ extension BrowserViewController: QRCodeViewControllerDelegate {
     func didScanQRCodeWithURL(_ url: URL) {
         guard let tab = tabManager.selectedTab else { return }
         finishEditingAndSubmit(url, visitType: VisitType.typed, forTab: tab)
-        UnifiedTelemetry.recordEvent(category: .action, method: .scan, object: .qrCodeURL)
+        TelemetryWrapper.recordEvent(category: .action, method: .scan, object: .qrCodeURL)
     }
 
     func didScanQRCodeWithText(_ text: String) {
-        guard let tab = tabManager.selectedTab else { return }
-        submitSearchText(text, forTab: tab)
-        UnifiedTelemetry.recordEvent(category: .action, method: .scan, object: .qrCodeText)
+        TelemetryWrapper.recordEvent(category: .action, method: .scan, object: .qrCodeText)
+        let content = TextContentDetector.detectTextContent(text)
+        switch content {
+        case .some(.link(let url)):
+            UIApplication.shared.open(url, options: [:], completionHandler: nil)
+        case .some(.phoneNumber(let phoneNumber)):
+            let url = URL(string: "tel:\(phoneNumber)")!
+            UIApplication.shared.open(url, options: [:], completionHandler: nil)
+        default:
+            guard let tab = tabManager.selectedTab else { return }
+            submitSearchText(text, forTab: tab)
+        }
     }
 }
 
 extension BrowserViewController: SettingsDelegate {
     func settingsOpenURLInNewTab(_ url: URL) {
         let isPrivate = tabManager.selectedTab?.isPrivate ?? false
-        self.openURLInNewTab(url, isPrivate: isPrivate, isPrivileged: false)
+        self.openURLInNewTab(url, isPrivate: isPrivate)
     }
 }
 
@@ -1217,12 +1247,12 @@ extension BrowserViewController: URLBarDelegate {
 
         updateFindInPageVisibility(visible: false)
 
-        let tabTrayController = TabTrayController(tabManager: tabManager, profile: profile, tabTrayDelegate: self)
+        let tabTrayController = TabTrayControllerV1(tabManager: tabManager, profile: profile, tabTrayDelegate: self)
 
         if let tab = tabManager.selectedTab {
             screenshotHelper.takeScreenshot(tab)
         }
-
+        
         navigationController?.pushViewController(tabTrayController, animated: true)
         self.tabTrayController = tabTrayController
     }
@@ -1249,8 +1279,16 @@ extension BrowserViewController: URLBarDelegate {
             self.updateFindInPageVisibility(visible: true)
         }
 
-        let successCallback: (String) -> Void = { (successMessage) in
-            SimpleToast().showAlertWithText(successMessage, bottomContainer: self.webViewContainer)
+        let successCallback: (String, ButtonToastAction) -> Void = { (successMessage, toastAction) in
+            switch toastAction {
+            case .removeBookmark:
+                let toast = ButtonToast(labelText: successMessage, buttonText: Strings.UndoString, textAlignment: .left) { isButtonTapped in
+                    isButtonTapped ? self.addBookmark(url: urlString) : nil
+                }
+                self.show(toast: toast)
+            default:
+                SimpleToast().showAlertWithText(successMessage, bottomContainer: self.webViewContainer)
+            }
         }
 
         let deferredBookmarkStatus: Deferred<Maybe<Bool>> = fetchBookmarkStatus(for: urlString)
@@ -1278,11 +1316,13 @@ extension BrowserViewController: URLBarDelegate {
         presentActivityViewController(url, tab: tab, sourceView: button, sourceRect: button.bounds, arrowDirection: .up)
     }
 
-    func urlBarDidTapShield(_ urlBar: URLBarView, from button: UIButton) {
+    func urlBarDidTapShield(_ urlBar: URLBarView) {
         if let tab = self.tabManager.selectedTab {
             let trackingProtectionMenu = self.getTrackingSubMenu(for: tab)
-            guard !trackingProtectionMenu.isEmpty else { return }
-            self.presentSheetWith(actions: trackingProtectionMenu, on: self, from: urlBar)
+            let title = String.localizedStringWithFormat(Strings.TPPageMenuTitle, tab.url?.host ?? "")
+            LeanPlumClient.shared.track(event: .trackingProtectionMenu)
+            TelemetryWrapper.recordEvent(category: .action, method: .press, object: .trackingProtectionMenu)
+            self.presentSheetWith(title: title, actions: trackingProtectionMenu, on: self, from: urlBar)
         }
     }
 
@@ -1295,17 +1335,19 @@ extension BrowserViewController: URLBarDelegate {
     }
 
     func urlBarDidPressReaderMode(_ urlBar: URLBarView) {
+        libraryDrawerViewController?.close()
+
         guard let tab = tabManager.selectedTab, let readerMode = tab.getContentScript(name: "ReaderMode") as? ReaderMode else {
             return
         }
         switch readerMode.state {
         case .available:
             enableReaderMode()
-            UnifiedTelemetry.recordEvent(category: .action, method: .tap, object: .readerModeOpenButton)
+            TelemetryWrapper.recordEvent(category: .action, method: .tap, object: .readerModeOpenButton)
             LeanPlumClient.shared.track(event: .useReaderView)
         case .active:
             disableReaderMode()
-            UnifiedTelemetry.recordEvent(category: .action, method: .tap, object: .readerModeCloseButton)
+            TelemetryWrapper.recordEvent(category: .action, method: .tap, object: .readerModeCloseButton)
         case .unavailable:
             break
         }
@@ -1324,7 +1366,7 @@ extension BrowserViewController: URLBarDelegate {
         switch result.value {
         case .success:
             UIAccessibility.post(notification: UIAccessibility.Notification.announcement, argument: NSLocalizedString("Added page to Reading List", comment: "Accessibility message e.g. spoken by VoiceOver after the current page gets added to the Reading List using the Reader View button, e.g. by long-pressing it or by its accessibility custom action."))
-            // TODO: https://bugzilla.mozilla.org/show_bug.cgi?id=1158503 provide some form of 'this has been added' visual feedback?
+            SimpleToast().showAlertWithText(Strings.ShareAddToReadingListDone, bottomContainer: self.webViewContainer)
         case .failure(let error):
             UIAccessibility.post(notification: UIAccessibility.Notification.announcement, argument: NSLocalizedString("Could not add page to Reading List. Maybe it’s already there?", comment: "Accessibility message e.g. spoken by VoiceOver after the user wanted to add current page to the Reading List and this was not done, likely because it already was in the Reading List, but perhaps also because of real failures."))
             print("readingList.createRecordWithURL(url: \"\(url.absoluteString)\", ...) failed with error: \(error)")
@@ -1357,12 +1399,7 @@ extension BrowserViewController: URLBarDelegate {
         let urlActions = self.getLongPressLocationBarActions(with: urlBar)
         let generator = UIImpactFeedbackGenerator(style: .heavy)
         generator.impactOccurred()
-        if let tab = self.tabManager.selectedTab {
-            let trackingProtectionMenu = self.getTrackingMenu(for: tab, presentingOn: urlBar)
-            self.presentSheetWith(actions: [urlActions, trackingProtectionMenu], on: self, from: urlBar)
-        } else {
-            self.presentSheetWith(actions: [urlActions], on: self, from: urlBar)
-        }
+        self.presentSheetWith(actions: [urlActions], on: self, from: urlBar)
     }
 
     func urlBarDidPressScrollToTop(_ urlBar: URLBarView) {
@@ -1401,21 +1438,15 @@ extension BrowserViewController: URLBarDelegate {
     func urlBar(_ urlBar: URLBarView, didSubmitText text: String) {
         guard let currentTab = tabManager.selectedTab else { return }
 
-        currentBookmarksKeywordQuery?.cancel()
-
         if let fixupURL = URIFixup.getURL(text) {
             // The user entered a URL, so use it.
             finishEditingAndSubmit(fixupURL, visitType: VisitType.typed, forTab: currentTab)
             return
         }
 
-        // TODO: We need a `getURLForKeywordSearch` API in RustPlaces to
-        // handle the keyword search.
-        submitSearchText(text, forTab: currentTab)
-        /*
         // We couldn't build a URL, so check for a matching search keyword.
         let trimmedText = text.trimmingCharacters(in: .whitespaces)
-        guard let possibleKeywordQuerySeparatorSpace = trimmedText.index(of: " ") else {
+        guard let possibleKeywordQuerySeparatorSpace = trimmedText.firstIndex(of: " ") else {
             submitSearchText(text, forTab: currentTab)
             return
         }
@@ -1423,19 +1454,9 @@ extension BrowserViewController: URLBarDelegate {
         let possibleKeyword = String(trimmedText[..<possibleKeywordQuerySeparatorSpace])
         let possibleQuery = String(trimmedText[trimmedText.index(after: possibleKeywordQuerySeparatorSpace)...])
 
-        let deferred = profile.bookmarks.getURLForKeywordSearch(possibleKeyword)
-        currentBookmarksKeywordQuery = deferred as? Cancellable
+        profile.places.getBookmarkURLForKeyword(keyword: possibleKeyword).uponQueue(.main) { result in
 
-        deferred.uponQueue(.main) { result in
-            defer {
-                self.currentBookmarksKeywordQuery = nil
-            }
-
-            guard let deferred = deferred as? Cancellable, !deferred.cancelled else {
-                return
-            }
-
-            if var urlString = result.successValue,
+            if var urlString = result.successValue ?? "",
                 let escapedQuery = possibleQuery.addingPercentEncoding(withAllowedCharacters: NSCharacterSet.urlQueryAllowed),
                 let range = urlString.range(of: "%s") {
                 urlString.replaceSubrange(range, with: escapedQuery)
@@ -1448,7 +1469,6 @@ extension BrowserViewController: URLBarDelegate {
 
             self.submitSearchText(text, forTab: currentTab)
         }
-        */
     }
 
     fileprivate func submitSearchText(_ text: String, forTab tab: Tab) {
@@ -1457,6 +1477,7 @@ extension BrowserViewController: URLBarDelegate {
         if let searchURL = engine.searchURLForQuery(text) {
             // We couldn't find a matching search keyword, so do a search query.
             Telemetry.default.recordSearch(location: .actionBar, searchEngine: engine.engineID ?? "other")
+            GleanMetrics.Search.counts["\(engine.engineID ?? "custom").\(SearchesMeasurement.SearchLocation.actionBar.rawValue)"].add()
             finishEditingAndSubmit(searchURL, visitType: VisitType.typed, forTab: tab)
         } else {
             // We still don't have a valid URL, so something is broken. Give up.
@@ -1466,6 +1487,7 @@ extension BrowserViewController: URLBarDelegate {
     }
 
     func urlBarDidEnterOverlayMode(_ urlBar: URLBarView) {
+        libraryDrawerViewController?.close()
         guard let profile = profile as? BrowserProfile else {
             return
         }
@@ -1539,9 +1561,6 @@ extension BrowserViewController: TabDelegate {
         let printHelper = PrintHelper(tab: tab)
         tab.addContentScript(printHelper, name: PrintHelper.name())
 
-        let customSearchHelper = CustomSearchHelper(tab: tab)
-        tab.addContentScript(customSearchHelper, name: CustomSearchHelper.name())
-
         let nightModeHelper = NightModeHelper(tab: tab)
         tab.addContentScript(nightModeHelper, name: NightModeHelper.name())
 
@@ -1550,10 +1569,6 @@ extension BrowserViewController: TabDelegate {
         // tab.addHelper(spotlightHelper, name: SpotlightHelper.name())
 
         tab.addContentScript(LocalRequestHelper(), name: LocalRequestHelper.name())
-
-        let historyStateHelper = HistoryStateHelper(tab: tab)
-        historyStateHelper.delegate = self
-        tab.addContentScript(historyStateHelper, name: HistoryStateHelper.name())
 
         let blocker = FirefoxTabContentBlocker(tab: tab, prefs: profile.prefs)
         tab.contentBlocker = blocker
@@ -1648,7 +1663,7 @@ extension BrowserViewController: LibraryPanelDelegate {
     }
 
     func libraryPanelDidRequestToOpenInNewTab(_ url: URL, isPrivate: Bool) {
-        let tab = self.tabManager.addTab(PrivilegedRequest(url: url) as URLRequest, afterTab: self.tabManager.selectedTab, isPrivate: isPrivate)
+        let tab = self.tabManager.addTab(URLRequest(url: url), afterTab: self.tabManager.selectedTab, isPrivate: isPrivate)
         // If we are showing toptabs a user can just use the top tab bar
         // If in overlay mode switching doesnt correctly dismiss the homepanels
         guard !topTabsVisible, !self.urlBar.inOverlayMode else {
@@ -1667,6 +1682,7 @@ extension BrowserViewController: LibraryPanelDelegate {
 extension BrowserViewController: HomePanelDelegate {
     func homePanelDidRequestToOpenLibrary(panel: LibraryPanelType) {
         showLibrary(panel: panel)
+        view.endEditing(true)
     }
 
     func homePanel(didSelectURL url: URL, visitType: VisitType) {
@@ -1675,7 +1691,7 @@ extension BrowserViewController: HomePanelDelegate {
     }
 
     func homePanelDidRequestToOpenInNewTab(_ url: URL, isPrivate: Bool) {
-        let tab = self.tabManager.addTab(PrivilegedRequest(url: url) as URLRequest, afterTab: self.tabManager.selectedTab, isPrivate: isPrivate)
+        let tab = self.tabManager.addTab(URLRequest(url: url), afterTab: self.tabManager.selectedTab, isPrivate: isPrivate)
         // If we are showing toptabs a user can just use the top tab bar
         // If in overlay mode switching doesnt correctly dismiss the homepanels
         guard !topTabsVisible, !self.urlBar.inOverlayMode else {
@@ -1717,6 +1733,8 @@ extension BrowserViewController: SearchViewControllerDelegate {
 
 extension BrowserViewController: TabManagerDelegate {
     func tabManager(_ tabManager: TabManager, didSelectedTabChange selected: Tab?, previous: Tab?, isRestoring: Bool) {
+        libraryDrawerViewController?.close(immediately: true)
+
         // Reset the scroll position for the ActivityStreamPanel so that it
         // is always presented scrolled to the top when switching tabs.
         if !isRestoring, selected != previous,
@@ -1872,7 +1890,7 @@ extension BrowserViewController: TabManagerDelegate {
 
         toast.showToast(viewController: self, delay: delay, duration: duration, makeConstraints: { make in
             make.left.right.equalTo(self.view)
-            make.bottom.equalTo(self.webViewContainer?.safeArea.bottom ?? 0)
+            make.bottom.equalTo(self.webViewContainer?.snp.bottom ?? 0)
         })
     }
 
@@ -1910,22 +1928,76 @@ extension BrowserViewController: UIAdaptivePresentationControllerDelegate {
     }
 }
 
-extension BrowserViewController: IntroViewControllerDelegate {
-    @discardableResult func presentIntroViewController(_ force: Bool = false, animated: Bool = true) -> Bool {
+extension BrowserViewController {
+    func presentIntroViewController(_ alwaysShow: Bool = false) {
         if let deeplink = self.profile.prefs.stringForKey("AdjustDeeplinkKey"), let url = URL(string: deeplink) {
             self.launchFxAFromDeeplinkURL(url)
-            return true
+            return
         }
-
-        if force || profile.prefs.intForKey(PrefsKeys.IntroSeen) == nil {
-            let introViewController = IntroViewController()
-            introViewController.delegate = self
-            // On iPad we present it modally in a controller
-            if topTabsVisible {
-                introViewController.preferredContentSize = CGSize(width: IntroUX.Width, height: IntroUX.Height)
-                introViewController.modalPresentationStyle = .formSheet
+        if alwaysShow || profile.prefs.intForKey(PrefsKeys.IntroSeen) == nil {
+            onboardingUserResearchHelper(alwaysShow)
+        }
+    }
+    
+    func presentETPCoverSheetViewController(_ force: Bool = false) {
+        guard !hasTriedToPresentETPAlready else {
+            return
+        }
+        hasTriedToPresentETPAlready = true
+        let cleanInstall = UpdateViewModel.isCleanInstall(userPrefs: profile.prefs)
+        let shouldShow = ETPViewModel.shouldShowETPCoverSheet(userPrefs: profile.prefs, isCleanInstall: cleanInstall)
+        guard force || shouldShow else {
+            return
+        }
+        let etpCoverSheetViewController = ETPCoverSheetViewController()
+        if topTabsVisible {
+            etpCoverSheetViewController.preferredContentSize = CGSize(width: ViewControllerConsts.PreferredSize.UpdateViewController.width, height: ViewControllerConsts.PreferredSize.UpdateViewController.height)
+            etpCoverSheetViewController.modalPresentationStyle = .formSheet
+        } else {
+            etpCoverSheetViewController.modalPresentationStyle = .fullScreen
+        }
+        etpCoverSheetViewController.viewModel.startBrowsing = {
+            etpCoverSheetViewController.dismiss(animated: true) {
+            if self.navigationController?.viewControllers.count ?? 0 > 1 {
+                _ = self.navigationController?.popToRootViewController(animated: true)
+                }
             }
-            present(introViewController, animated: animated) {
+        }
+        etpCoverSheetViewController.viewModel.goToSettings = {
+            etpCoverSheetViewController.dismiss(animated: true) {
+                let settingsTableViewController = ContentBlockerSettingViewController(prefs: self.profile.prefs)
+                settingsTableViewController.profile = self.profile
+                settingsTableViewController.tabManager = self.tabManager
+                settingsTableViewController.settingsDelegate = self
+                self.presentThemedViewController(navItemLocation: .Left, navItemText: .Close, vcBeingPresented: settingsTableViewController, topTabsVisible: self.topTabsVisible)
+            }
+        }
+        present(etpCoverSheetViewController, animated: true, completion: nil)
+    }
+    
+    @discardableResult func presentUpdateViewController(_ force: Bool = false, animated: Bool = true) -> Bool {
+        let cleanInstall = UpdateViewModel.isCleanInstall(userPrefs: profile.prefs)
+        let coverSheetSupportedAppVersion = UpdateViewModel.coverSheetSupportedAppVersion
+        if force || UpdateViewModel.shouldShowUpdateSheet(userPrefs: profile.prefs, isCleanInstall: cleanInstall, supportedAppVersions: coverSheetSupportedAppVersion) {
+            let updateViewController = UpdateViewController()
+            
+            updateViewController.viewModel.startBrowsing = {
+                updateViewController.dismiss(animated: true) {
+                if self.navigationController?.viewControllers.count ?? 0 > 1 {
+                    _ = self.navigationController?.popToRootViewController(animated: true)
+                    }
+                }
+            }
+            
+            if topTabsVisible {
+                updateViewController.preferredContentSize = CGSize(width: ViewControllerConsts.PreferredSize.UpdateViewController.width, height: ViewControllerConsts.PreferredSize.UpdateViewController.height)
+                updateViewController.modalPresentationStyle = .formSheet
+            } else {
+                updateViewController.modalPresentationStyle = .fullScreen
+            }
+            
+            // On iPad we present it modally in a controller
+            present(updateViewController, animated: animated) {
                 // On first run (and forced) open up the homepage in the background.
                 if let homePageURL = NewTabHomePageAccessors.getHomePage(self.profile.prefs), let tab = self.tabManager.selectedTab, DeviceInfo.hasConnectivity() {
                     tab.loadRequest(URLRequest(url: homePageURL))
@@ -1934,8 +2006,53 @@ extension BrowserViewController: IntroViewControllerDelegate {
 
             return true
         }
-
+        
         return false
+    }
+    
+    private func onboardingUserResearchHelper(_ alwaysShow: Bool = false) {
+        if alwaysShow {
+            showProperIntroVC()
+            return
+        }
+        // Setup user research closure and observer to fetch the updated LP Variables
+        onboardingUserResearch?.updatedLPVariable =  {
+            self.showProperIntroVC()
+        }
+        onboardingUserResearch?.lpVariableObserver()
+    }
+    
+    private func showProperIntroVC() {
+        let introViewController = IntroViewControllerV2()
+        introViewController.didFinishClosure = { controller, fxaLoginFlow in
+            self.profile.prefs.setInt(1, forKey: PrefsKeys.IntroSeen)
+            controller.dismiss(animated: true) {
+                if self.navigationController?.viewControllers.count ?? 0 > 1 {
+                    _ = self.navigationController?.popToRootViewController(animated: true)
+                }
+                if let flow = fxaLoginFlow {
+                    let fxaParams = FxALaunchParams(query: ["entrypoint": "firstrun"])
+                    self.presentSignInViewController(fxaParams, flowType: flow, referringPage: .onboarding)
+                }
+            }
+        }
+        self.introVCPresentHelper(introViewController: introViewController)
+    }
+    
+    private func introVCPresentHelper(introViewController: UIViewController) {
+        // On iPad we present it modally in a controller
+        if topTabsVisible {
+            introViewController.preferredContentSize = CGSize(width: ViewControllerConsts.PreferredSize.IntroViewController.width, height: ViewControllerConsts.PreferredSize.IntroViewController.height)
+            introViewController.modalPresentationStyle = .formSheet
+        } else {
+            introViewController.modalPresentationStyle = .fullScreen
+        }
+        present(introViewController, animated: true) {
+            // On first run (and forced) open up the homepage in the background.
+            if let homePageURL = NewTabHomePageAccessors.getHomePage(self.profile.prefs), let tab = self.tabManager.selectedTab, DeviceInfo.hasConnectivity() {
+                tab.loadRequest(URLRequest(url: homePageURL))
+            }
+        }
     }
 
     func launchFxAFromDeeplinkURL(_ url: URL) {
@@ -1947,26 +2064,30 @@ extension BrowserViewController: IntroViewControllerDelegate {
         self.presentSignInViewController(fxaParams)
     }
 
-    func introViewControllerDidFinish(_ introViewController: IntroViewController, requestToLogin: Bool) {
-        self.profile.prefs.setInt(1, forKey: PrefsKeys.IntroSeen)
-
-        introViewController.dismiss(animated: true) {
-            if self.navigationController?.viewControllers.count ?? 0 > 1 {
-                _ = self.navigationController?.popToRootViewController(animated: true)
-            }
-
-            if requestToLogin {
-                let fxaParams = FxALaunchParams(query: ["entrypoint": "firstrun"])
-                self.presentSignInViewController(fxaParams)
-            }
-        }
-    }
-
-    func getSignInViewController(_ fxaOptions: FxALaunchParams? = nil) -> UIViewController {
+    /// This function is called to determine if FxA sign in flow or settings page should be shown
+    /// - Parameters:
+    ///     - deepLinkParams: FxALaunchParams from deeplink query
+    ///     - flowType: FxAPageType is used to determine if email login, qr code login, or user settings page should be presented
+    ///     - referringPage: ReferringPage enum is used to handle telemetry events correctly for the view event and the FxA sign in tap events, need to know which route we took to get to them
+    func getSignInOrFxASettingsVC(_ deepLinkParams: FxALaunchParams? = nil, flowType: FxAPageType, referringPage: ReferringPage) -> UIViewController {
         // Show the settings page if we have already signed in. If we haven't then show the signin page
-        guard profile.hasAccount(), let status = profile.getAccount()?.actionNeeded, status == .none else {
-            let signInVC = FxAContentViewController(profile: profile, fxaOptions: fxaOptions)
-            signInVC.delegate = self
+        let parentType: FxASignInParentType
+        let object: TelemetryWrapper.EventObject
+        guard profile.hasSyncableAccount() else {
+            switch referringPage {
+            case .appMenu, .none:
+                parentType = .appMenu
+                object = .appMenu
+            case .onboarding:
+                parentType = .onboarding
+                object = .onboarding
+            case .settings:
+                parentType = .settings
+                object = .settings
+            }
+
+            let signInVC = FirefoxAccountSignInViewController(profile: profile, parentType: parentType, deepLinkParams: deepLinkParams)
+            TelemetryWrapper.recordEvent(category: .firefoxAccount, method: .view, object: object)
             return signInVC
         }
 
@@ -1975,30 +2096,15 @@ extension BrowserViewController: IntroViewControllerDelegate {
         return settingsTableViewController
     }
 
-    func presentSignInViewController(_ fxaOptions: FxALaunchParams? = nil) {
-        let vcToPresent = getSignInViewController(fxaOptions)
-        vcToPresent.navigationItem.rightBarButtonItem = UIBarButtonItem(barButtonSystemItem: .done, target: self, action: #selector(dismissSignInViewController))
-        let themedNavigationController = ThemedNavigationController(rootViewController: vcToPresent)
-        themedNavigationController.navigationBar.isTranslucent = false
-        self.present(themedNavigationController, animated: true, completion: nil)
+    func presentSignInViewController(_ fxaOptions: FxALaunchParams? = nil, flowType: FxAPageType = .emailLoginFlow, referringPage: ReferringPage = .none) {
+        let vcToPresent = getSignInOrFxASettingsVC(fxaOptions, flowType: flowType, referringPage: referringPage)
+        presentThemedViewController(navItemLocation: .Left, navItemText: .Close, vcBeingPresented: vcToPresent, topTabsVisible: UIDevice.current.userInterfaceIdiom == .pad)
     }
 
     @objc func dismissSignInViewController() {
         self.dismiss(animated: true, completion: nil)
     }
 
-}
-
-extension BrowserViewController: FxAContentViewControllerDelegate {
-    func contentViewControllerDidSignIn(_ viewController: FxAContentViewController, withFlags flags: FxALoginFlags) {
-        if flags.verified {
-            self.dismiss(animated: true, completion: nil)
-        }
-    }
-
-    func contentViewControllerDidCancel(_ viewController: FxAContentViewController) {
-        self.dismiss(animated: true, completion: nil)
-    }
 }
 
 extension BrowserViewController: ContextMenuHelperDelegate {
@@ -2049,14 +2155,13 @@ extension BrowserViewController: ContextMenuHelperDelegate {
             let bookmarkAction = UIAlertAction(title: Strings.ContextMenuBookmarkLink, style: .default) { _ in
                 self.addBookmark(url: url.absoluteString, title: elements.title)
                 SimpleToast().showAlertWithText(Strings.AppMenuAddBookmarkConfirmMessage, bottomContainer: self.webViewContainer)
-                UnifiedTelemetry.recordEvent(category: .action, method: .add, object: .bookmark, value: .contextMenu)
+                TelemetryWrapper.recordEvent(category: .action, method: .add, object: .bookmark, value: .contextMenu)
             }
             actionSheetController.addAction(bookmarkAction, accessibilityIdentifier: "linkContextMenu.bookmarkLink")
 
             let downloadAction = UIAlertAction(title: Strings.ContextMenuDownloadLink, style: .default) { _ in
                 self.pendingDownloadWebView = currentTab.webView
-                currentTab.webView?.evaluateJavaScript("window.__firefox__.download('\(url.absoluteString)', '\(UserScriptManager.securityToken)')")
-                UnifiedTelemetry.recordEvent(category: .action, method: .tap, object: .downloadLinkButton)
+                DownloadContentScript.requestDownload(url: url, tab: currentTab)
             }
             actionSheetController.addAction(downloadAction, accessibilityIdentifier: "linkContextMenu.download")
 
@@ -2079,22 +2184,26 @@ extension BrowserViewController: ContextMenuHelperDelegate {
             let photoAuthorizeStatus = PHPhotoLibrary.authorizationStatus()
             let saveImageAction = UIAlertAction(title: Strings.ContextMenuSaveImage, style: .default) { _ in
                 let handlePhotoLibraryAuthorized = {
-                    self.getImageData(url) { data in
-                        PHPhotoLibrary.shared().performChanges({
-                            PHAssetCreationRequest.forAsset().addResource(with: .photo, data: data, options: nil)
-                        })
+                    DispatchQueue.main.async {
+                        self.getImageData(url) { data in
+                            PHPhotoLibrary.shared().performChanges({
+                                PHAssetCreationRequest.forAsset().addResource(with: .photo, data: data, options: nil)
+                            })
+                        }
                     }
                 }
 
                 let handlePhotoLibraryDenied = {
-                    let accessDenied = UIAlertController(title: Strings.PhotoLibraryFirefoxWouldLikeAccessTitle, message: Strings.PhotoLibraryFirefoxWouldLikeAccessMessage, preferredStyle: .alert)
-                    let dismissAction = UIAlertAction(title: Strings.CancelString, style: .default, handler: nil)
-                    accessDenied.addAction(dismissAction)
-                    let settingsAction = UIAlertAction(title: Strings.OpenSettingsString, style: .default ) { _ in
-                        UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!, options: [:])
+                    DispatchQueue.main.async {
+                        let accessDenied = UIAlertController(title: Strings.PhotoLibraryFirefoxWouldLikeAccessTitle, message: Strings.PhotoLibraryFirefoxWouldLikeAccessMessage, preferredStyle: .alert)
+                        let dismissAction = UIAlertAction(title: Strings.CancelString, style: .default, handler: nil)
+                        accessDenied.addAction(dismissAction)
+                        let settingsAction = UIAlertAction(title: Strings.OpenSettingsString, style: .default ) { _ in
+                            UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!, options: [:])
+                        }
+                        accessDenied.addAction(settingsAction)
+                        self.present(accessDenied, animated: true, completion: nil)
                     }
-                    accessDenied.addAction(settingsAction)
-                    self.present(accessDenied, animated: true, completion: nil)
                 }
 
                 if photoAuthorizeStatus == .notDetermined {
@@ -2121,7 +2230,7 @@ extension BrowserViewController: ContextMenuHelperDelegate {
                 pasteboard.url = url as URL
                 let changeCount = pasteboard.changeCount
                 let application = UIApplication.shared
-                var taskId: UIBackgroundTaskIdentifier = UIBackgroundTaskIdentifier(rawValue: 0)
+                var taskId = UIBackgroundTaskIdentifier(rawValue: 0)
                 taskId = application.beginBackgroundTask (expirationHandler: {
                     application.endBackgroundTask(taskId)
                 })
@@ -2140,7 +2249,7 @@ extension BrowserViewController: ContextMenuHelperDelegate {
                     }
 
                     application.endBackgroundTask(taskId)
-                }
+                }.resume()
 
             }
             actionSheetController.addAction(copyAction, accessibilityIdentifier: "linkContextMenu.copyImage")
@@ -2151,16 +2260,20 @@ extension BrowserViewController: ContextMenuHelperDelegate {
             actionSheetController.addAction(copyImageLinkAction, accessibilityIdentifier: "linkContextMenu.copyImageLink")
         }
 
-        // If we're showing an arrow popup, set the anchor to the long press location.
-        if let popoverPresentationController = actionSheetController.popoverPresentationController {
-            popoverPresentationController.sourceView = view
-            popoverPresentationController.sourceRect = CGRect(origin: touchPoint, size: touchSize)
-            popoverPresentationController.permittedArrowDirections = .any
-            popoverPresentationController.delegate = self
+        let setupPopover = { [unowned self] in
+            // If we're showing an arrow popup, set the anchor to the long press location.
+            if let popoverPresentationController = actionSheetController.popoverPresentationController {
+                popoverPresentationController.sourceView = self.view
+                popoverPresentationController.sourceRect = CGRect(origin: touchPoint, size: touchSize)
+                popoverPresentationController.permittedArrowDirections = .any
+                popoverPresentationController.delegate = self
+            }
         }
+        setupPopover()
 
         if actionSheetController.popoverPresentationController != nil {
             displayedPopoverController = actionSheetController
+            updateDisplayedPopoverProperties = setupPopover
         }
 
         if let dialogTitle = dialogTitle {
@@ -2181,7 +2294,7 @@ extension BrowserViewController: ContextMenuHelperDelegate {
             if let _ = validatedHTTPResponse(response, statusCode: 200..<300), let data = data {
                 success(data)
             }
-        }
+        }.resume()
     }
 
     func contextMenuHelper(_ contextMenuHelper: ContextMenuHelper, didCancelGestureRecognizer: UIGestureRecognizer) {
@@ -2199,133 +2312,6 @@ extension BrowserViewController {
     }
 }
 
-extension BrowserViewController: HistoryStateHelperDelegate {
-
-    // This gets called when a website invokes the `history.pushState()` or
-    // `history.replaceState()` web API such as on single-page web apps. It
-    // also occurs during our session restore process, so we be sure to avoid
-    // re-saving the tab manager changes when this happens.
-    func historyStateHelper(_ historyStateHelper: HistoryStateHelper, didPushOrReplaceStateInTab tab: Tab) {
-        navigateInTab(tab: tab)
-
-        if let url = tab.url, let internalUrl = InternalURL(url), internalUrl.isSessionRestore {
-            return
-        }
-
-        tabManager.storeChanges()
-    }
-}
-
-/**
- A third party search engine Browser extension
-**/
-extension BrowserViewController {
-
-    func addCustomSearchButtonToWebView(_ webView: WKWebView) {
-        //check if the search engine has already been added.
-        let domain = webView.url?.domainURL.host
-        let matches = self.profile.searchEngines.orderedEngines.filter {$0.shortName == domain}
-        if !matches.isEmpty {
-            self.customSearchEngineButton.tintColor = UIColor.Photon.Grey50
-            self.customSearchEngineButton.isUserInteractionEnabled = false
-        } else {
-            self.customSearchEngineButton.tintColor = UIConstants.SystemBlueColor
-            self.customSearchEngineButton.isUserInteractionEnabled = true
-        }
-
-        /*
-         This is how we access hidden views in the WKContentView
-         Using the public headers we can find the keyboard accessoryView which is not usually available.
-         Specific values here are from the WKContentView headers.
-         https://github.com/JaviSoto/iOS9-Runtime-Headers/blob/master/Frameworks/WebKit.framework/WKContentView.h
-        */
-        guard let webContentView = UIView.findSubViewWithFirstResponder(webView) else {
-            /*
-             In some cases the URL bar can trigger the keyboard notification. In that case the webview isnt the first responder
-             and a search button should not be added.
-             */
-            return
-        }
-
-        guard let input = webContentView.perform(#selector(getter: UIResponder.inputAccessoryView)),
-            let inputView = input.takeUnretainedValue() as? UIInputView,
-            let nextButton = inputView.value(forKey: "_nextItem") as? UIBarButtonItem,
-            let nextButtonView = nextButton.value(forKey: "view") as? UIView else {
-                //failed to find the inputView instead lets use the inputAssistant
-                addCustomSearchButtonToInputAssistant(webContentView)
-                return
-            }
-            inputView.addSubview(self.customSearchEngineButton)
-            self.customSearchEngineButton.snp.remakeConstraints { make in
-                make.leading.equalTo(nextButtonView.snp.trailing).offset(20)
-                make.width.equalTo(inputView.snp.height)
-                make.top.equalTo(nextButtonView.snp.top)
-                make.height.equalTo(inputView.snp.height)
-            }
-    }
-
-    /**
-     This adds the customSearchButton to the inputAssistant
-     for cases where the inputAccessoryView could not be found for example
-     on the iPad where it does not exist. However this only works on iOS9
-     **/
-    func addCustomSearchButtonToInputAssistant(_ webContentView: UIView) {
-        guard customSearchBarButton == nil else {
-            return //The searchButton is already on the keyboard
-        }
-        let inputAssistant = webContentView.inputAssistantItem
-        let item = UIBarButtonItem(customView: customSearchEngineButton)
-        customSearchBarButton = item
-        inputAssistant.trailingBarButtonGroups.last?.barButtonItems.append(item)
-    }
-
-    @objc func addCustomSearchEngineForFocusedElement() {
-        guard let webView = tabManager.selectedTab?.webView else {
-            return
-        }
-        webView.evaluateJavaScript("__firefox__.searchQueryForField && __firefox__.searchQueryForField()") { (result, _) in
-            guard let searchQuery = result as? String, let favicon = self.tabManager.selectedTab!.displayFavicon else {
-                //Javascript responded with an incorrectly formatted message. Show an error.
-                let alert = ThirdPartySearchAlerts.failedToAddThirdPartySearch()
-                self.present(alert, animated: true, completion: nil)
-                return
-            }
-            self.addSearchEngine(searchQuery, favicon: favicon)
-            self.customSearchEngineButton.tintColor = UIColor.Photon.Grey50
-            self.customSearchEngineButton.isUserInteractionEnabled = false
-        }
-    }
-
-    func addSearchEngine(_ searchQuery: String, favicon: Favicon) {
-        guard !searchQuery.isEmpty,
-            let iconURL = URL(string: favicon.url),
-            let url = URL(string: searchQuery.addingPercentEncoding(withAllowedCharacters: CharacterSet.urlFragmentAllowed)!),
-            let shortName = url.domainURL.host else {
-                let alert = ThirdPartySearchAlerts.failedToAddThirdPartySearch()
-                self.present(alert, animated: true, completion: nil)
-                return
-        }
-
-        let alert = ThirdPartySearchAlerts.addThirdPartySearchEngine { alert in
-            self.customSearchEngineButton.tintColor = UIColor.Photon.Grey50
-            self.customSearchEngineButton.isUserInteractionEnabled = false
-            SDWebImageManager.shared.loadImage(with: iconURL, options: .continueInBackground, progress: nil) { (image, _, _, _, _, _) in
-                guard let image = image else {
-                    let alert = ThirdPartySearchAlerts.failedToAddThirdPartySearch()
-                    self.present(alert, animated: true, completion: nil)
-                    return
-                }
-
-                self.profile.searchEngines.addSearchEngine(OpenSearchEngine(engineID: nil, shortName: shortName, image: image, searchTemplate: searchQuery, suggestTemplate: nil, isCustomEngine: true))
-                let Toast = SimpleToast()
-                Toast.showAlertWithText(Strings.ThirdPartySearchEngineAdded, bottomContainer: self.webViewContainer)
-            }
-        }
-
-        self.present(alert, animated: true, completion: {})
-    }
-}
-
 extension BrowserViewController: KeyboardHelperDelegate {
     func keyboardHelper(_ keyboardHelper: KeyboardHelper, keyboardWillShowWithState state: KeyboardState) {
         keyboardState = state
@@ -2334,16 +2320,6 @@ extension BrowserViewController: KeyboardHelperDelegate {
         UIView.animate(withDuration: state.animationDuration) {
             UIView.setAnimationCurve(state.animationCurve)
             self.alertStackView.layoutIfNeeded()
-        }
-
-        guard let webView = tabManager.selectedTab?.webView else {
-            return
-        }
-        webView.evaluateJavaScript("__firefox__.searchQueryForField && __firefox__.searchQueryForField()") { (result, _) in
-            guard let _ = result as? String else {
-                return
-            }
-            self.addCustomSearchButtonToWebView(webView)
         }
     }
 
@@ -2354,15 +2330,6 @@ extension BrowserViewController: KeyboardHelperDelegate {
     func keyboardHelper(_ keyboardHelper: KeyboardHelper, keyboardWillHideWithState state: KeyboardState) {
         keyboardState = nil
         updateViewConstraints()
-        //If the searchEngineButton exists remove it form the keyboard
-        if let buttonGroup = customSearchBarButton?.buttonGroup {
-            buttonGroup.barButtonItems = buttonGroup.barButtonItems.filter { $0 != customSearchBarButton }
-            customSearchBarButton = nil
-        }
-
-        if self.customSearchEngineButton.superview != nil {
-            self.customSearchEngineButton.removeFromSuperview()
-        }
 
         UIView.animate(withDuration: state.animationDuration) {
             UIView.setAnimationCurve(state.animationCurve)
@@ -2386,17 +2353,17 @@ extension BrowserViewController: SessionRestoreHelperDelegate {
 extension BrowserViewController: TabTrayDelegate {
     // This function animates and resets the tab chrome transforms when
     // the tab tray dismisses.
-    func tabTrayDidDismiss(_ tabTray: TabTrayController) {
+    func tabTrayDidDismiss(_ tabTray: TabTrayControllerV1) {
         resetBrowserChrome()
     }
 
-    func tabTrayDidAddTab(_ tabTray: TabTrayController, tab: Tab) {}
+    func tabTrayDidAddTab(_ tabTray: TabTrayControllerV1, tab: Tab) {}
 
     func tabTrayDidAddBookmark(_ tab: Tab) {
         guard let url = tab.url?.absoluteString, !url.isEmpty else { return }
         let tabState = tab.tabState
         addBookmark(url: url, title: tabState.title, favicon: tabState.favicon)
-        UnifiedTelemetry.recordEvent(category: .action, method: .add, object: .bookmark, value: .tabTray)
+        TelemetryWrapper.recordEvent(category: .action, method: .add, object: .bookmark, value: .tabTray)
     }
 
     func tabTrayDidAddToReadingList(_ tab: Tab) -> ReadingListItem? {
@@ -2412,7 +2379,8 @@ extension BrowserViewController: TabTrayDelegate {
 // MARK: Browser Chrome Theming
 extension BrowserViewController: Themeable {
     func applyTheme() {
-        let ui: [Themeable?] = [urlBar, toolbar, readerModeBar, topTabsViewController, firefoxHomeViewController, searchController, libraryViewController]
+        guard self.isViewLoaded else { return }
+        let ui: [Themeable?] = [urlBar, toolbar, readerModeBar, topTabsViewController, firefoxHomeViewController, searchController, libraryViewController, libraryDrawerViewController]
         ui.forEach { $0?.applyTheme() }
         statusBarOverlay.backgroundColor = shouldShowTopTabsForTraitCollection(traitCollection) ? UIColor.Photon.Grey80 : urlBar.backgroundColor
         setNeedsStatusBarAppearanceUpdate()
@@ -2422,6 +2390,15 @@ extension BrowserViewController: Themeable {
         // Update the `background-color` of any blank webviews.
         let webViews = tabManager.tabs.compactMap({ $0.webView as? TabWebView })
         webViews.forEach({ $0.applyTheme() })
+
+        let tabs = tabManager.tabs
+        tabs.forEach {
+            $0.applyTheme()
+            urlBar.locationView.tabDidChangeContentBlocking($0)
+        }
+        
+        guard let contentScript = self.tabManager.selectedTab?.getContentScript(name: ReaderMode.name()) else { return }
+        appyThemeForPreferences(profile.prefs, contentScript: contentScript)
     }
 }
 
@@ -2433,15 +2410,18 @@ extension BrowserViewController: JSPromptAlertControllerDelegate {
 
 extension BrowserViewController: TopTabsDelegate {
     func topTabsDidPressTabs() {
+        libraryDrawerViewController?.close(immediately: true)
         urlBar.leaveOverlayMode(didCancel: true)
         self.urlBarDidPressTabs(urlBar)
     }
 
     func topTabsDidPressNewTab(_ isPrivate: Bool) {
+        libraryDrawerViewController?.close(immediately: true)
         openBlankNewTab(focusLocationField: false, isPrivate: isPrivate)
     }
 
     func topTabsDidTogglePrivateMode() {
+        libraryDrawerViewController?.close(immediately: true)
         guard let _ = tabManager.selectedTab else {
             return
         }
@@ -2449,6 +2429,7 @@ extension BrowserViewController: TopTabsDelegate {
     }
 
     func topTabsDidChangeTab() {
+        libraryDrawerViewController?.close()
         urlBar.leaveOverlayMode(didCancel: true)
     }
 }
@@ -2473,6 +2454,9 @@ extension BrowserViewController: DevicePickerViewControllerDelegate, Instruction
         }
         profile.sendItem(shareItem, toDevices: devices).uponQueue(.main) { _ in
             self.popToBVC()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                SimpleToast().showAlertWithText(Strings.AppMenuTabSentConfirmMessage, bottomContainer: self.webViewContainer)
+            }
         }
     }
 }
@@ -2497,7 +2481,7 @@ extension BrowserViewController {
         let cancelButtonText = Strings.ReopenLastTabCancelText
 
         func reopenLastTab(_ action: UIAlertAction) {
-            let request = PrivilegedRequest(url: lastClosedURL) as URLRequest
+            let request = URLRequest(url: lastClosedURL)
             let closedTab = tabManager.addTab(request, afterTab: selectedTab, isPrivate: false)
             tabManager.selectTab(closedTab)
         }
@@ -2507,5 +2491,19 @@ extension BrowserViewController {
         alert.addAction(UIAlertAction(title: cancelButtonText, style: .cancel, handler: nil), accessibilityIdentifier: "BrowserViewController.ReopenLastTabAlert.CancelButton")
 
         self.present(alert, animated: true, completion: nil)
+    }
+}
+
+extension BrowserViewController {
+    public static func foregroundBVC() -> BrowserViewController {
+//        if #available(iOS 13.0, *) {
+//            for scene in UIApplication.shared.connectedScenes {
+//                if scene.activationState == .foregroundActive, let sceneDelegate = ((scene as? UIWindowScene)?.delegate as? UIWindowSceneDelegate) {
+//                    return sceneDelegate.window!!.rootViewController as! BrowserViewController
+//                }
+//            }
+//        }
+        
+        return (UIApplication.shared.delegate as! AppDelegate).browserViewController
     }
 }

@@ -12,6 +12,7 @@ private struct QRCodeViewControllerUX {
     static let navigationBarTitleColor = UIColor.Photon.White100
     static let maskViewBackgroundColor = UIColor(red: 0, green: 0, blue: 0, alpha: 0.5)
     static let isLightingNavigationItemColor = UIColor(red: 0.45, green: 0.67, blue: 0.84, alpha: 1)
+    static let viewBackgroundDeniedColor = UIColor.black
 }
 
 protocol QRCodeViewControllerDelegate {
@@ -48,20 +49,6 @@ class QRCodeViewController: UIViewController {
     private var isLightOn: Bool = false
     private var shapeLayer = CAShapeLayer()
 
-    private var scanRange: CGRect {
-        let size = UIDevice.current.userInterfaceIdiom == .pad ?
-            CGSize(width: view.frame.width / 2, height: view.frame.width / 2) :
-            CGSize(width: view.frame.width / 3 * 2, height: view.frame.width / 3 * 2)
-        var rect = CGRect(size: size)
-        rect.center = UIScreen.main.bounds.center
-        return rect
-    }
-
-    private var scanBorderHeight: CGFloat {
-        return UIDevice.current.userInterfaceIdiom == .pad ?
-            view.frame.width / 2 : view.frame.width / 3 * 2
-    }
-
     override func viewDidLoad() {
         super.viewDidLoad()
 
@@ -92,8 +79,13 @@ class QRCodeViewController: UIViewController {
         if getAuthorizationStatus != .denied {
             setupCamera()
         } else {
+            view.backgroundColor = QRCodeViewControllerUX.viewBackgroundDeniedColor
+            self.navigationItem.rightBarButtonItem?.isEnabled = false
+
             let alert = UIAlertController(title: "", message: Strings.ScanQRCodePermissionErrorMessage, preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: Strings.ScanQRCodeErrorOKButton, style: .default, handler: nil))
+            alert.addAction(UIAlertAction(title: Strings.ScanQRCodeErrorOKButton, style: .default, handler: { (action) -> Void in
+                self.dismiss(animated: true)
+            }))
             self.present(alert, animated: true, completion: nil)
         }
 
@@ -104,58 +96,98 @@ class QRCodeViewController: UIViewController {
         self.view.addSubview(instructionsLabel)
 
         setupConstraints()
-        let rectPath = UIBezierPath(rect: UIScreen.main.bounds)
-        rectPath.append(UIBezierPath(rect: scanRange).reversing())
-        shapeLayer.path = rectPath.cgPath
-        maskView.layer.mask = shapeLayer
-
+        setupVideoPreviewLayer()
         isAnimationing = true
         startScanLineAnimation()
     }
+    
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        applyShapeLayer()
+    }
 
-    override func viewWillDisappear(_ animated: Bool) {
-        super.viewWillDisappear(animated)
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
         self.captureSession.stopRunning()
         stopScanLineAnimation()
     }
 
+    override func viewWillLayoutSubviews() {
+        super.viewWillLayoutSubviews()
+        applyShapeLayer()
+    }
+    
+    private func applyShapeLayer() {
+        view.layoutIfNeeded()
+        shapeLayer.removeFromSuperlayer()
+        let rectPath = UIBezierPath(rect: view.bounds)
+        rectPath.append(UIBezierPath(rect: scanBorder.frame).reversing())
+        shapeLayer.path = rectPath.cgPath
+        maskView.layer.mask = shapeLayer
+    }
+
     private func setupConstraints() {
-        maskView.snp.makeConstraints { (make) in
-            make.edges.equalTo(self.view)
+        maskView.snp.remakeConstraints { (make) in
+            make.edges.equalTo(view)
         }
-        if UIDevice.current.userInterfaceIdiom == .pad {
-            scanBorder.snp.makeConstraints { (make) in
+
+        let minSize = min(view.frame.width, view.frame.height)
+        if UIDevice.current.userInterfaceIdiom == .pad || UIDevice.current.orientation.isLandscape {
+            scanBorder.snp.remakeConstraints { make in
                 make.center.equalTo(self.view)
-                make.width.height.equalTo(view.frame.width / 2)
+                make.width.height.equalTo(minSize / 2)
             }
         } else {
-            scanBorder.snp.makeConstraints { (make) in
+            scanBorder.snp.remakeConstraints { make in
                 make.center.equalTo(self.view)
-                make.width.height.equalTo(view.frame.width / 3 * 2)
+                make.width.height.equalTo(minSize / 3 * 2)
             }
         }
-        scanLine.snp.makeConstraints { (make) in
+        scanLine.snp.remakeConstraints { make in
             make.left.equalTo(scanBorder.snp.left)
             make.top.equalTo(scanBorder.snp.top).offset(6)
             make.width.equalTo(scanBorder.snp.width)
             make.height.equalTo(6)
         }
 
-        instructionsLabel.snp.makeConstraints { (make) in
+        instructionsLabel.snp.remakeConstraints { make in
             make.left.right.equalTo(self.view.layoutMarginsGuide)
             make.top.equalTo(scanBorder.snp.bottom).offset(30)
         }
     }
 
+    private func setupVideoPreviewLayer() {
+        guard let videoPreviewLayer = self.videoPreviewLayer else {
+            return
+        }
+        videoPreviewLayer.frame = UIScreen.main.bounds
+        switch UIDevice.current.orientation {
+        case .portrait:
+            videoPreviewLayer.connection?.videoOrientation = AVCaptureVideoOrientation.portrait
+        case .landscapeLeft:
+            videoPreviewLayer.connection?.videoOrientation = AVCaptureVideoOrientation.landscapeRight
+        case .landscapeRight:
+            videoPreviewLayer.connection?.videoOrientation = AVCaptureVideoOrientation.landscapeLeft
+        case .portraitUpsideDown:
+            videoPreviewLayer.connection?.videoOrientation = AVCaptureVideoOrientation.portraitUpsideDown
+        default:
+            videoPreviewLayer.connection?.videoOrientation = AVCaptureVideoOrientation.portrait
+        }
+    }
+
+
     @objc func startScanLineAnimation() {
         if !isAnimationing {
             return
         }
-        self.view.layoutIfNeeded()
-        self.view.setNeedsLayout()
-        UIView.animate(withDuration: 2.4, animations: {
+        view.layoutIfNeeded()
+        view.setNeedsLayout()
+        UIView.animate(withDuration: 2.4,
+                       delay: 0,
+                       options: [.repeat],
+                       animations: {
             self.scanLine.snp.updateConstraints({ (make) in
-                make.top.equalTo(self.scanBorder.snp.top).offset(self.scanBorderHeight - 6)
+                make.top.equalTo(self.scanBorder.snp.top).offset(self.scanBorder.frame.size.height - 6)
             })
             self.view.layoutIfNeeded()
         }) { (value: Bool) in
@@ -230,29 +262,12 @@ class QRCodeViewController: UIViewController {
 
     }
 
-    override func willAnimateRotation(to toInterfaceOrientation: UIInterfaceOrientation, duration: TimeInterval) {
-        shapeLayer.removeFromSuperlayer()
-        let rectPath = UIBezierPath(rect: UIScreen.main.bounds)
-        rectPath.append(UIBezierPath(rect: scanRange).reversing())
-        shapeLayer.path = rectPath.cgPath
-        maskView.layer.mask = shapeLayer
-
-        guard let videoPreviewLayer = self.videoPreviewLayer else {
-            return
-        }
-        videoPreviewLayer.frame = UIScreen.main.bounds
-        switch toInterfaceOrientation {
-        case .portrait:
-            videoPreviewLayer.connection?.videoOrientation = AVCaptureVideoOrientation.portrait
-        case .landscapeLeft:
-            videoPreviewLayer.connection?.videoOrientation = AVCaptureVideoOrientation.landscapeLeft
-        case .landscapeRight:
-            videoPreviewLayer.connection?.videoOrientation = AVCaptureVideoOrientation.landscapeRight
-        case .portraitUpsideDown:
-            videoPreviewLayer.connection?.videoOrientation = AVCaptureVideoOrientation.portraitUpsideDown
-        default:
-            videoPreviewLayer.connection?.videoOrientation = AVCaptureVideoOrientation.portrait
-        }
+    override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+        coordinator.animate(alongsideTransition: { _ in
+            self.setupConstraints()
+            self.setupVideoPreviewLayer()
+        }, completion: nil)
     }
 }
 

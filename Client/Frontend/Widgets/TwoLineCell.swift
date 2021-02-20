@@ -19,6 +19,11 @@ class TwoLineTableViewCell: UITableViewCell, Themeable {
 
     let _textLabel = UILabel()
     let _detailTextLabel = UILabel()
+    lazy var selectedView: UIView = {
+        let view = UIView()
+        view.backgroundColor = UIColor.theme.tableView.selectedBackground
+        return view
+    }()
 
     // Override the default labels with our own to disable default UITableViewCell label behaviours like dynamic type
     override var textLabel: UILabel? {
@@ -39,6 +44,7 @@ class TwoLineTableViewCell: UITableViewCell, Themeable {
 
         indentationWidth = 0
         layoutMargins = .zero
+        selectedBackgroundView = selectedView
 
         separatorInset = UIEdgeInsets(top: 0, left: TwoLineCellUX.ImageSize + 2 * TwoLineCellUX.BorderViewMargin, bottom: 0, right: 0)
 
@@ -109,6 +115,7 @@ class SiteTableViewCell: TwoLineTableViewCell {
 
 class TwoLineHeaderFooterView: UITableViewHeaderFooterView, Themeable {
     fileprivate let twoLineHelper = TwoLineCellHelper()
+    fileprivate let bordersHelper = ThemedHeaderFooterViewBordersHelper()
 
     // UITableViewHeaderFooterView includes textLabel and detailTextLabel, so we can't override
     // them.  Unfortunately, they're also used in ways that interfere with us just using them: I get
@@ -132,6 +139,8 @@ class TwoLineHeaderFooterView: UITableViewHeaderFooterView, Themeable {
     override init(reuseIdentifier: String?) {
         super.init(reuseIdentifier: reuseIdentifier)
         twoLineHelper.setUpViews(self, textLabel: _textLabel, detailTextLabel: _detailTextLabel, imageView: imageView)
+        bordersHelper.initBorders(view: self)
+        setDefaultBordersValues()
 
         contentView.addSubview(_textLabel)
         contentView.addSubview(_detailTextLabel)
@@ -148,6 +157,16 @@ class TwoLineHeaderFooterView: UITableViewHeaderFooterView, Themeable {
 
     func applyTheme() {
         twoLineHelper.applyTheme()
+        bordersHelper.applyTheme()
+    }
+
+    func showBorder(for location: ThemedHeaderFooterViewBordersHelper.BorderLocation, _ show: Bool) {
+        bordersHelper.showBorder(for: location, show)
+    }
+
+    func setDefaultBordersValues() {
+        bordersHelper.showBorder(for: .top, true)
+        bordersHelper.showBorder(for: .bottom, true)
     }
 
     override func layoutSubviews() {
@@ -158,6 +177,7 @@ class TwoLineHeaderFooterView: UITableViewHeaderFooterView, Themeable {
     override func prepareForReuse() {
         super.prepareForReuse()
         twoLineHelper.setUpViews(self, textLabel: _textLabel, detailTextLabel: _detailTextLabel, imageView: imageView)
+        setDefaultBordersValues()
         applyTheme()
     }
 

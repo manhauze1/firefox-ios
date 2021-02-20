@@ -107,13 +107,19 @@ class SettingsContentViewController: UIViewController, WKNavigationDelegate {
     }
 
     func makeWebView() -> WKWebView {
-        let config = TabManager.makeWebViewConfig(isPrivate: true, blockPopups: true)
+        let config = TabManager.makeWebViewConfig(isPrivate: true, prefs: nil)
+        config.preferences.javaScriptCanOpenWindowsAutomatically = false
+
         let webView = WKWebView(
             frame: CGRect(width: 1, height: 1),
             configuration: config
         )
         webView.allowsLinkPreview = false
         webView.navigationDelegate = self
+
+        // This is not shown full-screen, use mobile UA
+        webView.customUserAgent = UserAgent.mobileUserAgent()
+
         return webView
     }
 

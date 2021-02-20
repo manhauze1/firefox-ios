@@ -167,6 +167,12 @@ public class RustPlaces {
         }
     }
 
+    public func getBookmarkURLForKeyword(keyword: String) -> Deferred<Maybe<String?>> {
+        return withReader { connection in
+            return try connection.getBookmarkURLForKeyword(keyword: keyword)
+        }
+    }
+
     public func getBookmarksWithURL(url: String) -> Deferred<Maybe<[BookmarkItem]>> {
         return withReader { connection in
             return try connection.getBookmarksWithURL(url: url)
@@ -237,6 +243,7 @@ public class RustPlaces {
         }
     }
 
+    @discardableResult
     public func createBookmark(parentGUID: GUID, url: String, title: String?, position: UInt32? = nil) -> Deferred<Maybe<GUID>> {
         return withWriter { connection in
             return try connection.createBookmark(parentGUID: parentGUID, url: url, title: title, position: position)
@@ -259,6 +266,10 @@ public class RustPlaces {
         }
 
         return error
+    }
+
+    public func interrupt() {
+        api?.interrupt()
     }
 
     public func forceClose() -> NSError? {
@@ -285,7 +296,7 @@ public class RustPlaces {
             }
 
             do {
-                try self.api?.syncBookmarks(unlockInfo: unlockInfo)
+                try _ = self.api?.syncBookmarks(unlockInfo: unlockInfo)
                 deferred.fill(Maybe(success: ()))
             } catch let err as NSError {
                 if let placesError = err as? PlacesError {
@@ -314,7 +325,7 @@ public class RustPlaces {
             }
 
             do {
-                try self.api?.resetBookmarksMetadata()
+                try self.api?.resetBookmarkSyncMetadata()
                 deferred.fill(Maybe(success: ()))
             } catch let error {
                 deferred.fill(Maybe(failure: error as MaybeErrorType))

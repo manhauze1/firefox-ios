@@ -24,29 +24,35 @@ class TabContentBlocker {
 
     @objc func notifiedTabSetupRequired() {}
 
-    func currentlyEnabledLists() -> [BlocklistName] {
+    func currentlyEnabledLists() -> [BlocklistFileName] {
         return []
     }
 
+    func notifyContentBlockingChanged() {}
+
     var status: BlockerStatus {
         guard isEnabled else {
-            return .Disabled
+            return .disabled
+        }
+        guard let url = tab?.currentURL() else {
+            return .noBlockedURLs
+        }
+
+        if ContentBlocker.shared.isSafelisted(url: url) {
+            return .safelisted
         }
         if stats.total == 0 {
-            guard let url = tab?.currentURL() else {
-                return .NoBlockedURLs
-            }
-            return ContentBlocker.shared.isWhitelisted(url: url) ? .Whitelisted : .NoBlockedURLs
+            return .noBlockedURLs
         } else {
-            return .Blocking
+            return .blocking
         }
     }
 
     var stats: TPPageStats = TPPageStats() {
         didSet {
-            guard let tab = self.tab else { return }
+            guard let _ = self.tab else { return }
             if stats.total <= 1 {
-                NotificationCenter.default.post(name: .didChangeContentBlocking, object: nil, userInfo: ["tab": tab])
+                notifyContentBlockingChanged()
             }
         }
     }

@@ -132,10 +132,10 @@ class ReaderViewTest: BaseTestCase {
 
         // Mark it as read/unread
         savedToReadingList.swipeLeft()
-        waitForExistence(app.buttons["Mark as  Read"])
-        app.buttons["Mark as  Read"].tap()
+        waitForExistence(app.tables.cells.buttons["trailing1"].staticTexts["Mark as  Read"])
+        app.tables.cells.buttons["trailing1"].tap()
         savedToReadingList.swipeLeft()
-        waitForExistence(app.buttons["Mark as  Unread"])
+        waitForExistence(app.buttons["trailing1"].staticTexts["Mark as  Unread"])
     }
 
     func testRemoveFromReadingList() {
@@ -210,5 +210,14 @@ class ReaderViewTest: BaseTestCase {
         // Verify the item has been removed
         waitForNoExistence(app.tables["ReadingTable"].cells.staticTexts["The Book of Mozilla"])
         XCTAssertFalse(app.tables["ReadingTable"].cells.staticTexts["The Book of Mozilla"].exists)
+    }
+
+    // Smoketest
+    func testAddToReaderListOptions() {
+        addContentToReaderView()
+        // Check that Settings layouts options are shown
+        waitForExistence(app.buttons["ReaderModeBarView.settingsButton"], timeout: 10)
+        app.buttons["ReaderModeBarView.settingsButton"].tap()
+        XCTAssertTrue(app.buttons["Light"].exists)
     }
 }

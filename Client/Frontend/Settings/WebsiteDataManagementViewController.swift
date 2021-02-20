@@ -26,7 +26,16 @@ class WebsiteDataManagementViewController: UIViewController, UITableViewDataSour
     var showMoreButtonEnabled = true
     let theme = BuiltinThemeName(rawValue: ThemeManager.instance.current.name) ?? .normal
 
-    private var siteRecords: [WKWebsiteDataRecord]?
+    private let searchResultsViewController = WebsiteDataSearchResultsViewController()
+
+    private var siteRecords: [WKWebsiteDataRecord]? {
+        didSet {
+            if let siteRecords = siteRecords {
+                // Keep Search Results View Controller Data Synchronized
+                searchResultsViewController.siteRecords = siteRecords
+            }
+        }
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -43,7 +52,7 @@ class WebsiteDataManagementViewController: UIViewController, UITableViewDataSour
         tableView.register(ThemedTableSectionHeaderFooterView.self, forHeaderFooterViewReuseIdentifier: SectionHeaderFooterIdentifier)
 
         let footer = ThemedTableSectionHeaderFooterView(frame: CGRect(width: tableView.bounds.width, height: SettingsUX.TableViewHeaderFooterHeight))
-        footer.showBottomBorder = false
+        footer.showBorder(for: .top, true)
         tableView.tableFooterView = footer
 
         view.addSubview(tableView)
@@ -60,7 +69,7 @@ class WebsiteDataManagementViewController: UIViewController, UITableViewDataSour
         getAllWebsiteData()
 
         // Search Controller setup
-        let searchResultsViewController = WebsiteDataSearchResultsViewController()
+        searchResultsViewController.delegate = self
 
         let searchController = UISearchController(searchResultsController: searchResultsViewController)
 
@@ -76,7 +85,6 @@ class WebsiteDataManagementViewController: UIViewController, UITableViewDataSour
             searchController.searchBar.barStyle = .black
         }
         navigationItem.searchController = searchController
-        navigationItem.hidesSearchBarWhenScrolling = false
         self.searchController = searchController
 
         definesPresentationContext = true
@@ -84,9 +92,7 @@ class WebsiteDataManagementViewController: UIViewController, UITableViewDataSour
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-
-        // Allows the search bar to be scrolled away even though we initially show it.
-        navigationItem.hidesSearchBarWhenScrolling = true
+        unfoldSearchbar()
     }
 
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
@@ -177,7 +183,21 @@ class WebsiteDataManagementViewController: UIViewController, UITableViewDataSour
     func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
         let headerView = tableView.dequeueReusableHeaderFooterView(withIdentifier: SectionHeaderFooterIdentifier) as? ThemedTableSectionHeaderFooterView
         headerView?.titleLabel.text = section == Section.sites.rawValue ? Strings.SettingsWebsiteDataTitle : nil
-        headerView?.showBottomBorder = false
+
+        headerView?.showBorder(for: .top, true)
+        headerView?.showBorder(for: .bottom, true)
+
+        // top section: no top border (this is a plain table)
+        guard let section = Section(rawValue: section) else { return headerView }
+        if section == .sites {
+            headerView?.showBorder(for: .top, false)
+
+            // no records: no bottom border (would make 2 with the one from the clear button)
+            let emptyRecords = siteRecords?.isEmpty ?? true
+            if emptyRecords {
+                headerView?.showBorder(for: .bottom, false)
+            }
+        }
         return headerView
     }
 
@@ -195,7 +215,8 @@ class WebsiteDataManagementViewController: UIViewController, UITableViewDataSour
 
     func tableView(_ tableView: UITableView, viewForFooterInSection section: Int) -> UIView? {
         let footerView = tableView.dequeueReusableHeaderFooterView(withIdentifier: SectionHeaderFooterIdentifier) as? ThemedTableSectionHeaderFooterView
-        footerView?.showBottomBorder = false
+        footerView?.showBorder(for: .top, true)
+        footerView?.showBorder(for: .bottom, true)
         return footerView
     }
 
@@ -230,6 +251,18 @@ class WebsiteDataManagementViewController: UIViewController, UITableViewDataSour
 
         siteRecords = []
         showMoreButtonEnabled = false
+        tableView.reloadData()
+    }
+    
+    private func unfoldSearchbar() {
+        guard let searchBarHeight = navigationItem.searchController?.searchBar.intrinsicContentSize.height else { return }
+        tableView.setContentOffset(CGPoint(x: 0, y: -searchBarHeight + tableView.contentOffset.y), animated: true)
+    }
+}
+
+extension WebsiteDataManagementViewController: WebsiteDataSearchResultsViewControllerDelegate {
+    func websiteDataSearchResultsViewController(_ viewController: WebsiteDataSearchResultsViewController, didDeleteRecord record: WKWebsiteDataRecord) {
+        siteRecords?.removeAll(where: { $0 == record })
         tableView.reloadData()
     }
 }

@@ -42,8 +42,7 @@ class HistoryClearable: Clearable {
     func clear() -> Success {
 
         // Treat desktop sites as part of browsing history.
-        try? FileManager.default.removeItem(at: Tab.DesktopSites.file)
-        Tab.DesktopSites.hostList.removeAll()
+        Tab.ChangeUserAgent.clear()
 
         return profile.history.clearHistory().bindQueue(.main) { success in
             SDImageCache.shared.clearDisk()
@@ -163,7 +162,7 @@ class TrackingProtectionClearable: Clearable {
 
     func clear() -> Success {
         let result = Success()
-        ContentBlocker.shared.clearWhitelist() {
+        ContentBlocker.shared.clearSafelist() {
             result.fill(Maybe(success: ()))
         }
         return result

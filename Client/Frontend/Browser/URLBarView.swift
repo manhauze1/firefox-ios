@@ -36,7 +36,7 @@ protocol URLBarDelegate: AnyObject {
     func urlBarDidLongPressLocation(_ urlBar: URLBarView)
     func urlBarDidPressQRButton(_ urlBar: URLBarView)
     func urlBarDidPressPageOptions(_ urlBar: URLBarView, from button: UIButton)
-    func urlBarDidTapShield(_ urlBar: URLBarView, from button: UIButton)
+    func urlBarDidTapShield(_ urlBar: URLBarView)
     func urlBarLocationAccessibilityActions(_ urlBar: URLBarView) -> [UIAccessibilityCustomAction]?
     func urlBarDidPressScrollToTop(_ urlBar: URLBarView)
     func urlBar(_ urlBar: URLBarView, didRestoreText text: String)
@@ -93,7 +93,6 @@ class URLBarView: UIView {
         let locationView = TabLocationView()
         locationView.layer.cornerRadius = URLBarViewUX.TextFieldCornerRadius
         locationView.translatesAutoresizingMaskIntoConstraints = false
-        locationView.readerModeState = ReaderModeState.unavailable
         locationView.delegate = self
         return locationView
     }()
@@ -110,6 +109,7 @@ class URLBarView: UIView {
     lazy var tabsButton: TabsButton = {
         let tabsButton = TabsButton.tabTrayButton()
         tabsButton.accessibilityIdentifier = "URLBarView.tabsButton"
+        tabsButton.inTopTabs = false
         return tabsButton
     }()
 
@@ -133,7 +133,7 @@ class URLBarView: UIView {
         let button = InsetButton()
         button.setImage(UIImage.templateImageNamed("menu-ScanQRCode"), for: .normal)
         button.accessibilityIdentifier = "urlBar-scanQRCode"
-        cancelButton.accessibilityLabel = Strings.ScanQRCodeViewTitle
+        button.accessibilityLabel = Strings.ScanQRCodeViewTitle
         button.clipsToBounds = false
         button.addTarget(self, action: #selector(showQRScanner), for: .touchUpInside)
         button.setContentHuggingPriority(UILayoutPriority(rawValue: 1000), for: .horizontal)
@@ -150,10 +150,10 @@ class URLBarView: UIView {
         return button
     }()
 
-    var menuButton = ToolbarButton()
+    var appMenuButton = ToolbarButton()
     var libraryButton = ToolbarButton()
+    var addNewTabButton = ToolbarButton()
 
-    var bookmarkButton = ToolbarButton()
     var forwardButton = ToolbarButton()
     var stopReloadButton = ToolbarButton()
 
@@ -163,7 +163,7 @@ class URLBarView: UIView {
         return backButton
     }()
 
-    lazy var actionButtons: [Themeable & UIButton] = [self.tabsButton, self.libraryButton, self.menuButton, self.forwardButton, self.backButton, self.stopReloadButton]
+    lazy var actionButtons: [Themeable & UIButton] = [self.tabsButton, self.libraryButton, self.appMenuButton, self.addNewTabButton,  self.forwardButton, self.backButton, self.stopReloadButton]
 
     var currentURL: URL? {
         get {
@@ -181,7 +181,8 @@ class URLBarView: UIView {
     }
 
     fileprivate let privateModeBadge = BadgeWithBackdrop(imageName: "privateModeBadge", backdropCircleColor: UIColor.Defaults.MobilePrivatePurple)
-    fileprivate let hideImagesBadge = BadgeWithBackdrop(imageName: "menuBadge")
+    fileprivate let appMenuBadge = BadgeWithBackdrop(imageName: "menuBadge")
+    fileprivate let warningMenuBadge = BadgeWithBackdrop(imageName: "menuWarning", imageMask: "warning-mask")
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -197,12 +198,13 @@ class URLBarView: UIView {
         locationContainer.addSubview(locationView)
 
         [scrollToTopButton, line, tabsButton, progressBar, cancelButton, showQRScannerButton,
-         libraryButton, menuButton, forwardButton, backButton, stopReloadButton, locationContainer].forEach {
+         libraryButton, appMenuButton, addNewTabButton, forwardButton, backButton, stopReloadButton, locationContainer].forEach {
             addSubview($0)
         }
 
         privateModeBadge.add(toParent: self)
-        hideImagesBadge.add(toParent: self)
+        appMenuBadge.add(toParent: self)
+        warningMenuBadge.add(toParent: self)
 
         helper = TabToolbarHelper(toolbar: self)
         setupConstraints()
@@ -258,19 +260,25 @@ class URLBarView: UIView {
         }
 
         libraryButton.snp.makeConstraints { make in
-            make.trailing.equalTo(self.menuButton.snp.leading)
+            make.trailing.equalTo(self.appMenuButton.snp.leading)
             make.centerY.equalTo(self)
             make.size.equalTo(URLBarViewUX.ButtonHeight)
         }
 
-        menuButton.snp.makeConstraints { make in
+        appMenuButton.snp.makeConstraints { make in
             make.trailing.equalTo(self.safeArea.trailing).offset(-URLBarViewUX.Padding)
+            make.centerY.equalTo(self)
+            make.size.equalTo(URLBarViewUX.ButtonHeight)
+        }
+        
+        addNewTabButton.snp.makeConstraints { make in
+            make.trailing.equalTo(self.tabsButton.snp.leading)
             make.centerY.equalTo(self)
             make.size.equalTo(URLBarViewUX.ButtonHeight)
         }
 
         tabsButton.snp.makeConstraints { make in
-            make.trailing.equalTo(self.menuButton.snp.leading)
+            make.trailing.equalTo(self.appMenuButton.snp.leading)
             make.centerY.equalTo(self)
             make.size.equalTo(URLBarViewUX.ButtonHeight)
         }
@@ -282,7 +290,8 @@ class URLBarView: UIView {
         }
         
         privateModeBadge.layout(onButton: tabsButton)
-        hideImagesBadge.layout(onButton: menuButton)
+        appMenuBadge.layout(onButton: appMenuButton)
+        warningMenuBadge.layout(onButton: appMenuButton)
     }
 
     override func updateConstraints() {
@@ -311,9 +320,8 @@ class URLBarView: UIView {
                     if self.topTabsIsShowing {
                         make.trailing.equalTo(self.libraryButton.snp.leading).offset(-URLBarViewUX.Padding)
                     } else {
-                        make.trailing.equalTo(self.tabsButton.snp.leading).offset(-URLBarViewUX.Padding)
+                        make.trailing.equalTo(self.addNewTabButton.snp.leading).offset(-URLBarViewUX.Padding)
                     }
-
                 } else {
                     // Otherwise, left align the location view
                     make.leading.trailing.equalTo(self).inset(UIEdgeInsets(top: 0, left: URLBarViewUX.LocationLeftPadding-1, bottom: 0, right: URLBarViewUX.LocationLeftPadding-1))
@@ -357,6 +365,10 @@ class URLBarView: UIView {
         locationContainer.addSubview(locationTextField)
         locationTextField.snp.remakeConstraints { make in
             make.edges.equalTo(self.locationView)
+        }
+        // Disable dragging urls on iPhones because it conflicts with editing the text
+        if UIDevice.current.userInterfaceIdiom != .pad {
+            locationTextField.textDragInteraction?.isEnabled = false
         }
 
         locationTextField.applyTheme()
@@ -449,10 +461,11 @@ class URLBarView: UIView {
                 self.setLocation(locationText, search: search)
             }
         } else {
-            // Copy the current URL to the editable text field, then activate it.
-            self.setLocation(locationText, search: search)
             DispatchQueue.main.async {
                 self.locationTextField?.becomeFirstResponder()
+                // Need to set location again so text could be immediately selected.
+                self.setLocation(locationText, search: search)
+                self.locationTextField?.selectAll(nil)
             }
         }
     }
@@ -470,7 +483,8 @@ class URLBarView: UIView {
         cancelButton.isHidden = false
         showQRScannerButton.isHidden = false
         progressBar.isHidden = false
-        menuButton.isHidden = !toolbarIsShowing
+        addNewTabButton.isHidden = !toolbarIsShowing || !topTabsIsShowing
+        appMenuButton.isHidden = !toolbarIsShowing
         libraryButton.isHidden = !toolbarIsShowing || !topTabsIsShowing
         forwardButton.isHidden = !toolbarIsShowing
         backButton.isHidden = !toolbarIsShowing
@@ -484,8 +498,9 @@ class URLBarView: UIView {
         showQRScannerButton.alpha = inOverlayMode ? 1 : 0
         progressBar.alpha = inOverlayMode || didCancel ? 0 : 1
         tabsButton.alpha = inOverlayMode ? 0 : 1
-        menuButton.alpha = inOverlayMode ? 0 : 1
+        appMenuButton.alpha = inOverlayMode ? 0 : 1
         libraryButton.alpha = inOverlayMode ? 0 : 1
+        addNewTabButton.alpha = inOverlayMode ? 0 : 1
         forwardButton.alpha = inOverlayMode ? 0 : 1
         backButton.alpha = inOverlayMode ? 0 : 1
         stopReloadButton.alpha = inOverlayMode ? 0 : 1
@@ -514,7 +529,8 @@ class URLBarView: UIView {
         cancelButton.isHidden = !inOverlayMode
         showQRScannerButton.isHidden = !inOverlayMode
         progressBar.isHidden = inOverlayMode
-        menuButton.isHidden = !toolbarIsShowing || inOverlayMode
+        addNewTabButton.isHidden = !toolbarIsShowing || inOverlayMode
+        appMenuButton.isHidden = !toolbarIsShowing || inOverlayMode
         libraryButton.isHidden = !toolbarIsShowing || inOverlayMode || !topTabsIsShowing
         forwardButton.isHidden = !toolbarIsShowing || inOverlayMode
         backButton.isHidden = !toolbarIsShowing || inOverlayMode
@@ -522,7 +538,7 @@ class URLBarView: UIView {
         stopReloadButton.isHidden = !toolbarIsShowing || inOverlayMode
 
         // badge isHidden is tied to private mode on/off, use alpha to hide in this case
-        [privateModeBadge, hideImagesBadge].forEach {
+        [privateModeBadge, appMenuBadge, warningMenuBadge].forEach {
             $0.badge.alpha = (!toolbarIsShowing || inOverlayMode) ? 0 : 1
             $0.backdrop.alpha = (!toolbarIsShowing || inOverlayMode) ? 0 : BadgeWithBackdrop.backdropAlpha
         }
@@ -568,8 +584,19 @@ extension URLBarView: TabToolbarProtocol {
         }
     }
 
-    func hideImagesBadge(visible: Bool) {
-        hideImagesBadge.show(visible)
+    func appMenuBadge(setVisible: Bool) {
+        // Warning badges should take priority over the standard badge
+        guard warningMenuBadge.badge.isHidden else {
+            return
+        }
+
+        appMenuBadge.show(setVisible)
+    }
+
+    func warningMenuBadge(setVisible: Bool) {
+        // Disable other menu badges before showing the warning.
+        if !appMenuBadge.badge.isHidden { appMenuBadge.show(false) }
+        warningMenuBadge.show(setVisible)
     }
 
     func updateBackStatus(_ canGoBack: Bool) {
@@ -597,6 +624,10 @@ extension URLBarView: TabToolbarProtocol {
         stopReloadButton.isEnabled = isWebPage
     }
 
+    func updateIsSearchStatus(_ isHomePag: Bool) {
+
+    }
+
     var access: [Any]? {
         get {
             if inOverlayMode {
@@ -604,7 +635,7 @@ extension URLBarView: TabToolbarProtocol {
                 return [locationTextField, cancelButton]
             } else {
                 if toolbarIsShowing {
-                    return [backButton, forwardButton, stopReloadButton, locationView, tabsButton, libraryButton, menuButton, progressBar]
+                    return [backButton, forwardButton, stopReloadButton, locationView, tabsButton, libraryButton, appMenuButton, addNewTabButton, progressBar]
                 } else {
                     return [locationView, progressBar]
                 }
@@ -665,7 +696,7 @@ extension URLBarView: TabLocationViewDelegate {
     }
 
     func tabLocationViewDidTapShield(_ tabLocationView: TabLocationView) {
-        delegate?.urlBarDidTapShield(self, from: tabLocationView.trackingProtectionButton)
+        delegate?.urlBarDidTapShield(self)
     }
 }
 
@@ -682,10 +713,6 @@ extension URLBarView: AutocompleteTextFieldDelegate {
 
     func autocompleteTextField(_ autocompleteTextField: AutocompleteTextField, didEnterText text: String) {
         delegate?.urlBar(self, didEnterText: text)
-    }
-
-    func autocompleteTextFieldDidBeginEditing(_ autocompleteTextField: AutocompleteTextField) {
-        autocompleteTextField.highlightAll()
     }
 
     func autocompleteTextFieldShouldClear(_ autocompleteTextField: AutocompleteTextField) -> Bool {
@@ -726,6 +753,7 @@ extension URLBarView: Themeable {
 
         actionButtons.forEach { $0.applyTheme() }
         tabsButton.applyTheme()
+        addNewTabButton.applyTheme()
 
         cancelTintColor = UIColor.theme.browser.tint
         showQRButtonTintColor = UIColor.theme.browser.tint
@@ -737,7 +765,8 @@ extension URLBarView: Themeable {
         locationContainer.backgroundColor = UIColor.theme.textField.background
 
         privateModeBadge.badge.tintBackground(color: UIColor.theme.browser.background)
-        hideImagesBadge.badge.tintBackground(color: UIColor.theme.browser.background)
+        appMenuBadge.badge.tintBackground(color: UIColor.theme.browser.background)
+        warningMenuBadge.badge.tintBackground(color: UIColor.theme.browser.background)
     }
 }
 

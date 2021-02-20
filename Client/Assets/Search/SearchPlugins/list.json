@@ -145,7 +145,7 @@
     "de": {
       "default": {
         "visibleDefaultEngines": [
-          "google-b-m", "bing", "amazon-de", "ddg", "qwant", "twitter", "wikipedia-de"
+          "google-b-m", "bing", "amazon-de", "ddg", "qwant", "twitter", "wikipedia-de", "ecosia"
         ]
       }
     },
@@ -725,7 +725,7 @@
     "uk": {
       "default": {
         "visibleDefaultEngines": [
-          "google-b-m", "twitter", "wikipedia-uk", "yandex-market"
+          "google-b-m", "twitter", "wikipedia-uk", "hotline"
         ]
       }
     },

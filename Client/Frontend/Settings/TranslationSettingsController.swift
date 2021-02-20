@@ -7,7 +7,6 @@ import Shared
 
 class TranslationSettingsController: ThemedTableViewController {
     struct UX {
-        static var rowHeight: CGFloat = 70
         static var footerFontSize: CGFloat = 12
     }
 
@@ -37,8 +36,6 @@ class TranslationSettingsController: ThemedTableViewController {
 
         let headerFooterFrame = CGRect(width: self.view.frame.width, height: SettingsUX.TableViewHeaderFooterHeight)
         let headerView = ThemedTableSectionHeaderFooterView(frame: headerFooterFrame)
-        headerView.showTopBorder = false
-        headerView.showBottomBorder = true
         tableView.tableHeaderView = headerView
         headerView.titleLabel.text = Strings.SettingTranslateSnackBarSectionHeader
     }
@@ -68,7 +65,7 @@ class TranslationSettingsController: ThemedTableViewController {
             UIView.transition(with: self.tableView, duration: 0.2, options: .transitionCrossDissolve, animations: { self.tableView.reloadData()  })
         }
 
-        UnifiedTelemetry.recordEvent(category: .action, method: .change, object: .setting, value: "show-translation", extras: ["to": control.isOn ? "on" : "off"])
+        TelemetryWrapper.recordEvent(category: .action, method: .change, object: .setting, value: "show-translation", extras: ["to": control.isOn ? "on" : "off"])
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
@@ -126,10 +123,6 @@ class TranslationSettingsController: ThemedTableViewController {
             return setting.list.count
         }
         return 0
-    }
-
-    override func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
-        return indexPath.section == Section.translationOnOff.rawValue ? UX.rowHeight : super.tableView(tableView, heightForRowAt: indexPath)
     }
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {

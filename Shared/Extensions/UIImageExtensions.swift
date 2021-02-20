@@ -35,22 +35,16 @@ extension UIImage {
     }
 
     public static func createWithColor(_ size: CGSize, color: UIColor) -> UIImage {
-        UIGraphicsBeginImageContextWithOptions(size, false, 0.0)
-        let context = UIGraphicsGetCurrentContext()
-        let rect = CGRect(size: size)
-        color.setFill()
-        context!.fill(rect)
-        let image = UIGraphicsGetImageFromCurrentImageContext()
-        UIGraphicsEndImageContext()
-        return image!
+        UIGraphicsImageRenderer(size: size).image { (ctx) in
+            color.setFill()
+            ctx.fill(CGRect(size: size))
+        }
     }
 
     public func createScaled(_ size: CGSize) -> UIImage {
-        UIGraphicsBeginImageContextWithOptions(size, false, 0)
-        draw(in: CGRect(size: size))
-        let scaledImage = UIGraphicsGetImageFromCurrentImageContext()
-        UIGraphicsEndImageContext()
-        return scaledImage!
+        UIGraphicsImageRenderer(size: size).image { (ctx) in
+            draw(in: CGRect(size: size))
+        }
     }
 
     public static func templateImageNamed(_ name: String) -> UIImage? {
@@ -67,23 +61,5 @@ extension UIImage {
             draw(in: rect, blendMode: .destinationIn, alpha: 1)
         }
         return result
-    }
-
-    // TESTING ONLY: not for use in release/production code.
-    // PNG comparison can return false negatives, be very careful using for non-equal comparison.
-    // PNG comparison requires UIImages to be constructed the same way in order for the metadata block to match,
-    // this function ensures that.
-    //
-    // This can be verified with this code:
-    //    let image = UIImage(named: "fxLogo")!
-    //    let data = UIImagePNGRepresentation(image)!
-    //    assert(data != UIImagePNGRepresentation(UIImage(data: data)!))
-    public func isStrictlyEqual(to other: UIImage) -> Bool {
-        // Must use same constructor for PNG metadata block to be the same.
-        let imageA = UIImage(data: self.pngData()!)!
-        let imageB = UIImage(data: other.pngData()!)!
-        let dataA = imageA.pngData()!
-        let dataB = imageB.pngData()!
-        return dataA == dataB
     }
 }

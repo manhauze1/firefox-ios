@@ -23,7 +23,8 @@ struct MIMEType {
     static let PNG = "image/png"
     static let WebP = "image/webp"
     static let Calendar = "text/calendar"
-    static let USDZ = "model/usd"
+    static let USDZ = "model/vnd.usdz+zip"
+    static let Reality = "model/vnd.reality"
 
     private static let webViewViewableTypes: [String] = [MIMEType.Bitmap, MIMEType.GIF, MIMEType.JPEG, MIMEType.HTML, MIMEType.PDF, MIMEType.PlainText, MIMEType.PNG, MIMEType.WebP]
 
@@ -57,6 +58,12 @@ class DownloadHelper: NSObject, OpenInHelper {
     fileprivate let preflightResponse: URLResponse
     fileprivate let browserViewController: BrowserViewController
 
+    static func requestDownload(url: URL, tab: Tab) {
+        let safeUrl = url.absoluteString.replacingOccurrences(of: "'", with: "%27")
+        tab.webView?.evaluateJavaScript("window.__firefox__.download('\(safeUrl)', '\(UserScriptManager.securityToken)')")
+        TelemetryWrapper.recordEvent(category: .action, method: .tap, object: .downloadLinkButton)
+    }
+    
     required init?(request: URLRequest?, response: URLResponse, canShowInWebView: Bool, forceDownload: Bool, browserViewController: BrowserViewController) {
         guard let request = request else {
             return nil
@@ -89,17 +96,25 @@ class DownloadHelper: NSObject, OpenInHelper {
 
         let expectedSize = download.totalBytesExpected != nil ? ByteCountFormatter.string(fromByteCount: download.totalBytesExpected!, countStyle: .file) : nil
 
-        let filenameItem: PhotonActionSheetItem
+        var filenameItem: PhotonActionSheetItem
         if let expectedSize = expectedSize {
             let expectedSizeAndHost = "\(expectedSize) — \(host)"
             filenameItem = PhotonActionSheetItem(title: download.filename, text: expectedSizeAndHost, iconString: "file", iconAlignment: .right, bold: true)
         } else {
             filenameItem = PhotonActionSheetItem(title: download.filename, text: host, iconString: "file", iconAlignment: .right, bold: true)
         }
+        filenameItem.customHeight = { _ in
+            return 80
+        }
+        filenameItem.customRender = { label, contentView in
+            label.numberOfLines = 2
+            label.font = DynamicFontHelper.defaultHelper.DeviceFontSmallBold
+            label.lineBreakMode = .byCharWrapping
+        }
 
-        let downloadFileItem = PhotonActionSheetItem(title: Strings.OpenInDownloadHelperAlertDownloadNow, iconString: "download") { _ in
+        let downloadFileItem = PhotonActionSheetItem(title: Strings.OpenInDownloadHelperAlertDownloadNow, iconString: "download") { _, _ in
             self.browserViewController.downloadQueue.enqueue(download)
-            UnifiedTelemetry.recordEvent(category: .action, method: .tap, object: .downloadNowButton)
+            TelemetryWrapper.recordEvent(category: .action, method: .tap, object: .downloadNowButton)
         }
 
         let actions = [[filenameItem], [downloadFileItem]]
@@ -154,7 +169,7 @@ class OpenQLPreviewHelper: NSObject, OpenInHelper, QLPreviewControllerDataSource
     fileprivate let previewController: QLPreviewController
 
     required init?(request: URLRequest?, response: URLResponse, canShowInWebView: Bool, forceDownload: Bool, browserViewController: BrowserViewController) {
-        guard let mimeType = response.mimeType, mimeType == MIMEType.USDZ, let responseURL = response.url as NSURL?, QLPreviewController.canPreview(responseURL), !forceDownload, !canShowInWebView else { return nil }
+        guard let mimeType = response.mimeType, mimeType == MIMEType.USDZ || mimeType == MIMEType.Reality, let responseURL = response.url as NSURL?, QLPreviewController.canPreview(responseURL), !forceDownload, !canShowInWebView else { return nil }
         self.url = responseURL
         self.browserViewController = browserViewController
         self.previewController = QLPreviewController()

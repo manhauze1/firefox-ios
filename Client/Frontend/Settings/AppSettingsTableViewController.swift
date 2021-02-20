@@ -8,6 +8,8 @@ import Account
 
 /// App Settings Screen (triggered by tapping the 'Gear' in the Tab Tray Controller)
 class AppSettingsTableViewController: SettingsTableViewController {
+    var showContentBlockerSetting = false
+
     override func viewDidLoad() {
         super.viewDidLoad()
 
@@ -22,21 +24,22 @@ class AppSettingsTableViewController: SettingsTableViewController {
 
         // Refresh the user's FxA profile upon viewing settings. This will update their avatar,
         // display name, etc.
-        profile.getAccount()?.updateProfile()
+        ////profile.rustAccount.refreshProfile()
 
+        if showContentBlockerSetting {
+            let viewController = ContentBlockerSettingViewController(prefs: profile.prefs)
+            viewController.profile = profile
+            viewController.tabManager = tabManager
+            navigationController?.pushViewController(viewController, animated: false)
+            // Add a done button from this view
+            viewController.navigationItem.rightBarButtonItem = navigationItem.rightBarButtonItem
+        }
     }
 
     override func generateSettings() -> [SettingSection] {
         var settings = [SettingSection]()
 
         let privacyTitle = NSLocalizedString("Privacy", comment: "Privacy section title")
-        let accountDebugSettings = [
-            // Debug settings:
-            RequirePasswordDebugSetting(settings: self),
-            RequireUpgradeDebugSetting(settings: self),
-            ForgetSyncAuthStateDebugSetting(settings: self),
-            StageSyncServiceDebugSetting(settings: self),
-        ]
 
         let prefs = profile.prefs
         var generalSettings: [Setting] = [
@@ -45,7 +48,7 @@ class AppSettingsTableViewController: SettingsTableViewController {
             HomeSetting(settings: self),
             OpenWithSetting(settings: self),
             ThemeSetting(settings: self),
-            BoolSetting(prefs: prefs, prefKey: "blockPopups", defaultValue: true,
+            BoolSetting(prefs: prefs, prefKey: PrefsKeys.KeyBlockPopups, defaultValue: true,
                         titleText: NSLocalizedString("Block Pop-up Windows", comment: "Block pop-up windows setting")),
            ]
 
@@ -58,7 +61,7 @@ class AppSettingsTableViewController: SettingsTableViewController {
         }
 
         let accountChinaSyncSetting: [Setting]
-        if !BrowserProfile.isChinaEdition {
+        if !AppInfo.isChinaEdition {
             accountChinaSyncSetting = []
         } else {
             accountChinaSyncSetting = [
@@ -73,7 +76,10 @@ class AppSettingsTableViewController: SettingsTableViewController {
         generalSettings += [
             BoolSetting(prefs: prefs, prefKey: "showClipboardBar", defaultValue: false,
                         titleText: Strings.SettingsOfferClipboardBarTitle,
-                        statusText: Strings.SettingsOfferClipboardBarStatus)
+                        statusText: Strings.SettingsOfferClipboardBarStatus),
+            BoolSetting(prefs: prefs, prefKey: PrefsKeys.ContextMenuShowLinkPreviews, defaultValue: true,
+                        titleText: Strings.SettingsShowLinkPreviewsTitle,
+                        statusText: Strings.SettingsShowLinkPreviewsStatus)
         ]
 
         let accountSectionTitle = NSAttributedString(string: Strings.FxAFirefoxAccount)
@@ -83,11 +89,11 @@ class AppSettingsTableViewController: SettingsTableViewController {
             SettingSection(title: accountSectionTitle, footerTitle: footerText, children: [
                 // Without a Firefox Account:
                 ConnectSetting(settings: self),
-                AdvanceAccountSetting(settings: self),
+                AdvancedAccountSetting(settings: self),
                 // With a Firefox Account:
                 AccountStatusSetting(settings: self),
                 SyncNowSetting(settings: self)
-            ] + accountChinaSyncSetting + accountDebugSettings)]
+            ] + accountChinaSyncSetting )]
 
         settings += [ SettingSection(title: NSAttributedString(string: Strings.SettingsGeneralSectionTitle), children: generalSettings)]
 
@@ -127,7 +133,15 @@ class AppSettingsTableViewController: SettingsTableViewController {
                 ExportLogDataSetting(settings: self),
                 DeleteExportedDataSetting(settings: self),
                 ForceCrashSetting(settings: self),
-                SlowTheDatabase(settings: self)
+                SlowTheDatabase(settings: self),
+                ForgetSyncAuthStateDebugSetting(settings: self),
+                SentryIDSetting(settings: self),
+                ChangeToChinaSetting(settings: self),
+                ToggleOnboarding(settings: self),
+                ShowEtpCoverSheet(settings: self),
+                ToggleOnboarding(settings: self),
+                LeanplumStatus(settings: self),
+                ClearOnboardingABVariables(settings: self)
             ])]
 
         return settings
@@ -135,15 +149,6 @@ class AppSettingsTableViewController: SettingsTableViewController {
 
     override func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
         let headerView = super.tableView(tableView, viewForHeaderInSection: section) as! ThemedTableSectionHeaderFooterView
-        // Prevent the top border from showing for the General section.
-        if !profile.hasAccount() {
-            switch section {
-                case 1:
-                    headerView.showTopBorder = false
-            default:
-                break
-            }
-        }
         return headerView
     }
 }

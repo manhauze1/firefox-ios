@@ -193,8 +193,6 @@ class ReadingListPanel: UITableViewController, LibraryPanel {
           Notification.Name.DatabaseWasReopened ].forEach {
             NotificationCenter.default.addObserver(self, selector: #selector(notificationReceived), name: $0, object: nil)
         }
-
-        applyTheme()
     }
 
     required init!(coder aDecoder: NSCoder) {
@@ -203,7 +201,8 @@ class ReadingListPanel: UITableViewController, LibraryPanel {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        refreshReadingList()
+        // Note this will then call applyTheme() on this class, which reloads the tableview.
+        (navigationController as? ThemedNavigationController)?.applyTheme()
     }
 
     override func viewDidLoad() {
@@ -268,7 +267,7 @@ class ReadingListPanel: UITableViewController, LibraryPanel {
         welcomeLabel.adjustsFontSizeToFitWidth = true
         welcomeLabel.snp.makeConstraints { make in
             make.centerX.equalToSuperview()
-            make.top.equalToSuperview().offset(150)
+            make.top.equalToSuperview().offset(UIDevice.current.orientation.isLandscape ? 16 : 150)
             make.width.equalTo(ReadingListPanelUX.WelcomeScreenItemWidth + ReadingListPanelUX.WelcomeScreenCircleSpacer + ReadingListPanelUX.WelcomeScreenCircleWidth)
         }
 
@@ -372,13 +371,13 @@ class ReadingListPanel: UITableViewController, LibraryPanel {
             // Reading list items are closest in concept to bookmarks.
             let visitType = VisitType.bookmark
             libraryPanelDelegate?.libraryPanel(didSelectURL: encodedURL, visitType: visitType)
-            UnifiedTelemetry.recordEvent(category: .action, method: .open, object: .readingListItem)
+            TelemetryWrapper.recordEvent(category: .action, method: .open, object: .readingListItem)
         }
     }
 
     fileprivate func deleteItem(atIndex indexPath: IndexPath) {
         if let record = records?[indexPath.row] {
-            UnifiedTelemetry.recordEvent(category: .action, method: .delete, object: .readingListItem, value: .readingListPanel)
+            TelemetryWrapper.recordEvent(category: .action, method: .delete, object: .readingListItem, value: .readingListPanel)
             if profile.readingList.deleteRecord(record).value.isSuccess {
                 records?.remove(at: indexPath.row)
                 tableView.deleteRows(at: [indexPath], with: .automatic)
@@ -392,7 +391,7 @@ class ReadingListPanel: UITableViewController, LibraryPanel {
 
     fileprivate func toggleItem(atIndex indexPath: IndexPath) {
         if let record = records?[indexPath.row] {
-            UnifiedTelemetry.recordEvent(category: .action, method: .tap, object: .readingListItem, value: !record.unread ? .markAsUnread : .markAsRead, extras: [ "from": "reading-list-panel" ])
+            TelemetryWrapper.recordEvent(category: .action, method: .tap, object: .readingListItem, value: !record.unread ? .markAsUnread : .markAsRead, extras: [ "from": "reading-list-panel" ])
             if let updatedRecord = profile.readingList.updateRecord(record, unread: !record.unread).value.successValue {
                 records?[indexPath.row] = updatedRecord
                 tableView.reloadRows(at: [indexPath], with: .automatic)
@@ -415,7 +414,7 @@ extension ReadingListPanel: LibraryPanelContextMenu {
     func getContextMenuActions(for site: Site, with indexPath: IndexPath) -> [PhotonActionSheetItem]? {
         guard var actions = getDefaultContextMenuActions(for: site, libraryPanelDelegate: libraryPanelDelegate) else { return nil }
 
-        let removeAction = PhotonActionSheetItem(title: Strings.RemoveContextMenuTitle, iconString: "action_remove", handler: { action in
+        let removeAction = PhotonActionSheetItem(title: Strings.RemoveContextMenuTitle, iconString: "action_remove", handler: { _, _ in
             self.deleteItem(atIndex: indexPath)
         })
 
@@ -431,7 +430,7 @@ extension ReadingListPanel: UITableViewDragDelegate {
             return []
         }
 
-        UnifiedTelemetry.recordEvent(category: .action, method: .drag, object: .url, value: .readingListPanel)
+        TelemetryWrapper.recordEvent(category: .action, method: .drag, object: .url, value: .readingListPanel)
 
         let dragItem = UIDragItem(itemProvider: itemProvider)
         dragItem.localObject = site

@@ -7,13 +7,20 @@ import SnapKit
 import Shared
 import WebKit
 
+protocol WebsiteDataSearchResultsViewControllerDelegate: class {
+    func websiteDataSearchResultsViewController(_ viewController: WebsiteDataSearchResultsViewController, didDeleteRecord record: WKWebsiteDataRecord)
+}
+
 private let SectionHeaderFooterIdentifier = "SectionHeaderFooterIdentifier"
 
 class WebsiteDataSearchResultsViewController: UIViewController, UITableViewDataSource, UITableViewDelegate {
-    var tableView: UITableView!
-    
-    private var filteredSiteRecords = [WKWebsiteDataRecord]()
+
+    weak var delegate: WebsiteDataSearchResultsViewControllerDelegate?
+
+    private var tableView: UITableView!
+
     var siteRecords = [WKWebsiteDataRecord]()
+    private var filteredSiteRecords = [WKWebsiteDataRecord]()
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -29,7 +36,7 @@ class WebsiteDataSearchResultsViewController: UIViewController, UITableViewDataS
         view.addSubview(tableView)
 
         let footer = ThemedTableSectionHeaderFooterView(frame: CGRect(width: tableView.bounds.width, height: SettingsUX.TableViewHeaderFooterHeight))
-        footer.showBottomBorder = false
+        footer.showBorder(for: .top, true)
         tableView.tableFooterView = footer
 
         tableView.snp.makeConstraints { make in
@@ -56,6 +63,7 @@ class WebsiteDataSearchResultsViewController: UIViewController, UITableViewDataS
 
         let types = WKWebsiteDataStore.allWebsiteDataTypes()
         WKWebsiteDataStore.default().removeData(ofTypes: types, for: [record]) {
+            self.delegate?.websiteDataSearchResultsViewController(self, didDeleteRecord: record)
             self.filteredSiteRecords.remove(at: indexPath.row)
             self.tableView.reloadData()
         }
@@ -64,6 +72,8 @@ class WebsiteDataSearchResultsViewController: UIViewController, UITableViewDataS
     func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
         let headerView = tableView.dequeueReusableHeaderFooterView(withIdentifier: SectionHeaderFooterIdentifier) as? ThemedTableSectionHeaderFooterView
         headerView?.titleLabel.text = Strings.SettingsWebsiteDataTitle
+        headerView?.showBorder(for: .top, section != 0)
+        headerView?.showBorder(for: .bottom, true)
         return headerView
     }
 

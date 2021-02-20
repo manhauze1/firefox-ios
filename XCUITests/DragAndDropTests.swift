@@ -8,7 +8,7 @@ let firstWebsite = (url: path(forTestPage: "test-mozilla-org.html"), tabName: "I
 let secondWebsite = (url: path(forTestPage: "test-mozilla-book.html"), tabName: "The Book of Mozilla")
 let exampleWebsite = (url: path(forTestPage: "test-example.html"), tabName: "Example Domain")
 let homeTabName = "Home"
-let websiteWithSearchField = (url: "https://developer.mozilla.org/en-US/search", urlSearchField: "Search the docs")
+let websiteWithSearchField = "https://developer.mozilla.org/en-US/"
 
 let exampleDomainTitle = "Example Domain"
 let twitterTitle = "Twitter"
@@ -27,6 +27,7 @@ class DragAndDropTests: BaseTestCase {
         navigator.goto(TabTray)
         checkTabsOrder(dragAndDropTab: false, firstTab: firstWebsite.tabName, secondTab: secondWebsite.tabName)
         dragAndDrop(dragElement: app.collectionViews.cells[firstWebsite.tabName], dropOnElement: app.collectionViews.cells[secondWebsite.tabName])
+        waitForExistence(app.collectionViews.cells["Internet for people, not profit — Mozilla"], timeout: 10)
         checkTabsOrder(dragAndDropTab: true, firstTab: secondWebsite.tabName, secondTab: firstWebsite.tabName)
     }
 
@@ -117,6 +118,7 @@ fileprivate extension BaseTestCase {
         let secondTabCell = app.collectionViews.cells.element(boundBy: 1).label
 
         if (dragAndDropTab) {
+            sleep(1)
             XCTAssertEqual(firstTabCell, firstTab, "first tab after is not correct")
             XCTAssertEqual(secondTabCell, secondTab, "second tab after is not correct")
         } else {
@@ -139,7 +141,7 @@ class DragAndDropTestIpad: IpadOnlyTestCase {
         let key = String(parts[1])
         if testWithDB.contains(key) {
             // for the current test name, add the db fixture used
-                launchArguments = [LaunchArguments.SkipIntro, LaunchArguments.SkipWhatsNew, LaunchArguments.LoadDatabasePrefix + historyAndBookmarksDB]
+                launchArguments = [LaunchArguments.SkipIntro, LaunchArguments.SkipWhatsNew, LaunchArguments.SkipETPCoverSheet, LaunchArguments.LoadDatabasePrefix + historyAndBookmarksDB]
         }
         super.setUp()
     }
@@ -176,7 +178,7 @@ class DragAndDropTestIpad: IpadOnlyTestCase {
         // Check that focus is kept on last website open
         XCTAssert(secondWebsite.url.contains(app.textFields["url"].value! as! String), "The tab has not been dropped correctly")
     }
-
+    /*Disabled due to 5561
     func testDragDropToInvalidArea() {
         if skipPlatform { return }
 
@@ -189,7 +191,7 @@ class DragAndDropTestIpad: IpadOnlyTestCase {
         checkTabsOrder(dragAndDropTab: false, firstTab: firstWebsite.tabName, secondTab: secondWebsite.tabName)
         // Check that focus on the website does not change either
         XCTAssert(secondWebsite.url.contains(app.textFields["url"].value! as! String), "The tab has not been dropped correctly")
-    }
+    }*/
 
     func testDragAndDropHomeTab() {
         if skipPlatform { return }
@@ -238,18 +240,20 @@ class DragAndDropTestIpad: IpadOnlyTestCase {
     }
 
     // This test drags the address bar and since it is not possible to drop it on another app, lets do it in a search box
+    /* Disable since the drag and drop is not working fine in this scenario on simulator
     func testDragAddressBarIntoSearchBox() {
         if skipPlatform { return }
 
-        navigator.openURL("developer.mozilla.org/en-US/search")
+        navigator.openURL("developer.mozilla.org/en-US")
         waitUntilPageLoad()
         // Check the text in the search field before dragging and dropping the url text field
-        XCTAssertEqual(app.webViews.searchFields[websiteWithSearchField.urlSearchField].placeholderValue, "Search the docs")
+        waitForValueContains(app.webViews.searchFields.element(boundBy: 0), value: "Search")
         // DragAndDrop the url for only one second so that the TP menu is not shown and the search box is not covered
-        app.textFields["url"].press(forDuration: 1, thenDragTo: app.webViews.searchFields[websiteWithSearchField.urlSearchField])
+        app.textFields["url"].press(forDuration: 1, thenDragTo: app.webViews.searchFields.element(boundBy: 0))
+
         // Verify that the text in the search field is the same as the text in the url text field
-        XCTAssertEqual(app.webViews.searchFields[websiteWithSearchField.urlSearchField].value as? String, websiteWithSearchField.url)
-    }
+        XCTAssertEqual(app.webViews.searchFields.element(boundBy: 0).value as? String, websiteWithSearchField)
+    }*/
 
     func testDragAndDropHistoryEntry() {
         if skipPlatform { return }

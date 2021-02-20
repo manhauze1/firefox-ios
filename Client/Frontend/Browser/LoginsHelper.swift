@@ -173,8 +173,9 @@ class LoginsHelper: TabContentScript {
         let promptMessage: String
         let https = "^https:\\/\\/"
         let url = login.hostname.replacingOccurrences(of: https, with: "", options: .regularExpression, range: nil)
-        if let username = login.username, !username.isEmpty {
-            promptMessage = String(format: Strings.SaveLoginUsernamePrompt, username, url)
+        let userName = login.username
+        if !userName.isEmpty {
+            promptMessage = String(format: Strings.SaveLoginUsernamePrompt, userName, url)
         } else {
             promptMessage = String(format: Strings.SaveLoginPrompt, url)
         }
@@ -208,8 +209,9 @@ class LoginsHelper: TabContentScript {
         new.id = old.id
 
         let formatted: String
-        if let username = new.username {
-            formatted = String(format: Strings.UpdateLoginUsernamePrompt, username, new.hostname)
+        let userName = new.username
+        if !userName.isEmpty {
+            formatted = String(format: Strings.UpdateLoginUsernamePrompt, userName, new.hostname)
         } else {
             formatted = String(format: Strings.UpdateLoginPrompt, new.hostname)
         }
@@ -254,12 +256,17 @@ class LoginsHelper: TabContentScript {
                 return
             }
 
-            log.debug("Found \(cursor.count) logins.")
+            let logins: [[String: Any]] = cursor.compactMap { login in
+                // `requestLogins` is for webpage forms, not for HTTP Auth, and the latter has httpRealm != nil; filter those out.
+                return login?.httpRealm == nil ? login?.toJSONDict() : nil
+            }
+
+            log.debug("Found \(logins.count) logins.")
 
             let dict: [String: Any] = [
                 "requestId": requestId,
                 "name": "RemoteLogins:loginsFound",
-                "logins": cursor.compactMap({ $0?.toJSONDict() })
+                "logins": logins
             ]
 
             let json = JSON(dict)

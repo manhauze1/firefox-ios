@@ -39,7 +39,8 @@ class NightModeHelper: TabContentScript {
     static func setNightMode(_ prefs: Prefs, tabManager: TabManager, enabled: Bool) {
         prefs.setBool(enabled, forKey: NightModePrefsKey.NightModeStatus)
         for tab in tabManager.tabs {
-            tab.setNightMode(enabled)
+            tab.nightMode = enabled
+            tab.webView?.scrollView.indicatorStyle = enabled ? .white : .default
         }
     }
 

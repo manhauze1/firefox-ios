@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 @testable import Client
+@testable import Account
 import Foundation
 import Shared
 import Storage
@@ -13,12 +14,26 @@ import XCTest
 /*
  * A base test type for tests that need a profile.
  */
+
 class ProfileTest: XCTestCase {
-    func withTestProfile(_ callback: (_ profile: Client.Profile) -> Void) {
-        let profile = MockProfile(databasePrefix: "profile-test")
-        profile._reopen()
-        callback(profile)
-        profile._shutdown()
+    
+    var profile: MockProfile?
+    
+    override func setUp() {
+        super.setUp()
+        continueAfterFailure = false
+        
+        // Setup mock profile 
+        profile = MockProfile(databasePrefix: "profile-test")
+    }
+    
+   func withTestProfile(_ callback: (_ profile: Client.Profile) -> Void) {
+        guard let mockProfile = profile else {
+            return
+        }
+        mockProfile._reopen()
+        callback(mockProfile)
+        mockProfile._shutdown()
     }
 
     func testNewProfileClearsExistingAuthenticationInfo() {
@@ -28,4 +43,5 @@ class ProfileTest: XCTestCase {
         let _ = BrowserProfile(localName: "my_profile", clear: true)
         XCTAssertNil(KeychainWrapper.sharedAppContainerKeychain.authenticationInfo())
     }
+    
 }

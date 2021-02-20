@@ -22,7 +22,6 @@ class MailAppSettingsTests: BaseTestCase {
         XCTAssertFalse(app.tables.cells.staticTexts["Spark"].isSelected)
         XCTAssertFalse(app.tables.cells.staticTexts["YMail!"].isSelected)
         XCTAssertFalse(app.tables.cells.staticTexts["Gmail"].isSelected)
-        XCTAssertFalse(app.tables.cells.staticTexts["Inbox by Gmail"].isSelected)
 
         // Check that tapping on an element does nothing
         waitForExistence(app.tables["OpenWithPage.Setting.Options"])
@@ -30,6 +29,7 @@ class MailAppSettingsTests: BaseTestCase {
         XCTAssertFalse(app.tables.cells.staticTexts["Airmail"].isSelected)
 
         // Check that user can go back from that setting
-        navigator.goto(HomePanelsScreen)
+        navigator.nowAt(OpenWithSettings)
+        navigator.goto(SettingsScreen)
     }
 }

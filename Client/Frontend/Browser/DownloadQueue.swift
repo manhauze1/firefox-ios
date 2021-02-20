@@ -4,8 +4,6 @@
 
 import Foundation
 
-private let downloadOperationQueue = OperationQueue()
-
 protocol DownloadDelegate {
     func download(_ download: Download, didCompleteWithError error: Error?)
     func download(_ download: Download, didDownloadBytes bytesDownloaded: Int64)
@@ -70,6 +68,12 @@ class HTTPDownload: Download {
 
     private var resumeData: Data?
 
+    // Used to avoid name spoofing using Unicode RTL char to change file extension
+    public static func stripUnicode(fromFilename string: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet.punctuationCharacters)
+        return string.components(separatedBy: allowed.inverted).joined()
+     }
+
     init(preflightResponse: URLResponse, request: URLRequest) {
         self.preflightResponse = preflightResponse
         self.request = request
@@ -77,7 +81,7 @@ class HTTPDownload: Download {
         super.init()
 
         if let filename = preflightResponse.suggestedFilename {
-            self.filename = filename
+            self.filename = HTTPDownload.stripUnicode(fromFilename: filename)
         }
 
         if let mimeType = preflightResponse.mimeType {
@@ -86,7 +90,7 @@ class HTTPDownload: Download {
 
         self.totalBytesExpected = preflightResponse.expectedContentLength > 0 ? preflightResponse.expectedContentLength : nil
 
-        self.session = URLSession(configuration: .default, delegate: self, delegateQueue: downloadOperationQueue)
+        self.session = URLSession(configuration: .default, delegate: self, delegateQueue: .main)
         self.task = session?.downloadTask(with: request)
     }
 
